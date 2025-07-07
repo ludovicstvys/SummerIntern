@@ -134,4 +134,7 @@ if __name__ == "__main__":
     procs = read_process_csv("processus_ouverts.csv")
     newprocs, oldprocs=new_process(offres,procs)
     send_email(newprocs,oldprocs)
+    print(f"[DEBUG] Nombre d’offres récupérées : {len(offres)}")
+    for o in offres:
+        print("  →", o)
     csv_file = ecriture_csv(offres)
