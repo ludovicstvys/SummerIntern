@@ -176,3 +176,4 @@ if __name__ == "__main__":
         print("  →", o)
     csv_file = ecriture_csv(offres)
     ecritures_csv(offres)
+    test()
