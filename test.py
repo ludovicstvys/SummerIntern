@@ -5,7 +5,7 @@ from email.message import EmailMessage
 import os
 
 def scrape_open_summer_internships():
-    URL = "https://careers.bankofamerica.com/en-us/students/job-search?ref=search&search=jobsByKeyword&start=0&rows=10&keywords=Summer+investment+banking"
+    URL = "https://app.the-trackr.com/uk-finance/summer-internships"
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
