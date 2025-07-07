@@ -136,6 +136,6 @@ if __name__ == "__main__":
     offres = scrape_open_summer_internships()
     procs = read_process_csv("processus_ouverts.csv")
     newprocs, oldprocs=new_process(offres,procs)
-    #if len(newprocs)>0:
-        #send_email(newprocs,oldprocs)
+    if len(newprocs)>0:
+        send_email(newprocs,oldprocs)
     csv_file = ecriture_csv(offres)
