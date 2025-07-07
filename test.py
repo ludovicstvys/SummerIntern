@@ -72,27 +72,43 @@ def ecriture_csv(open_offers, output_file="processus_ouverts.csv"):
     print(f"{len(open_offers)} offres exportées dans : {output_file}")
     return output_file
 
-def send_email(open_offers, old_procs):
-    # 1) Lecture des variables d’environnement
+def send_email(open_offers, csv_path=None):
+    # Lecture des vars d'env
     SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    port_str    = os.getenv("SMTP_PORT")
-    SMTP_PORT   = 587
+    SMTP_PORT   = 587  # STARTTLS
     SMTP_USER   = "torretotld@gmail.com"
     SMTP_PASS   = "ejah tjtv fkpi bmke"
     FROM_ADDR   = SMTP_USER
     TO_ADDRS    = "saintyves.ludovic@gmail.com"
 
-    # Préparer le corps
+    # Préparation du message
     body = "Voici la liste des summer internships:\n\n" + \
            "\n".join(f"• {comp} – {title} - {category} - {url}" for comp, title, category, url in open_offers)
     body+="\n Voici la liste des summer internships qui sont déjà ouverts:\n\n"+ \
            "\n".join(f"• {comp} – {title} - {category} - {url}" for comp, title, category, url in old_procs)
-
     msg = EmailMessage()
-    msg["Subject"] = "Nouveau Process Ouvert"
+    msg["Subject"] = "Summer Internships ouverts"
     msg["From"]    = FROM_ADDR
-    msg["To"]      = TO_ADDRS
+    msg["To"]      = ", ".join(TO_ADDRS)
     msg.set_content(body)
+
+    if csv_path:
+        with open(csv_path, "rb") as f:
+            data = f.read()
+        msg.add_attachment(data, maintype="text", subtype="csv", filename=os.path.basename(csv_path))
+
+    # Connexion explicite et envoi
+    smtp = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
+    smtp.connect(SMTP_SERVER, SMTP_PORT)  # <— OBLIGATOIRE ici
+    smtp.ehlo()
+    smtp.starttls()
+    smtp.ehlo()
+    smtp.login(SMTP_USER, SMTP_PASS)
+    smtp.send_message(msg, from_addr=FROM_ADDR, to_addrs=TO_ADDRS)
+    smtp.quit()
+
+    print(f"Email envoyé à : {TO_ADDRS}")
+
 
     # Envoi en précisant explicitement les destinataires
     with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as smtp:
