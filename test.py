@@ -138,5 +138,4 @@ if __name__ == "__main__":
     for o in offres:
         print("  →", o)
     csv_file = ecriture_csv(offres)
-    ecritures_csv(offres)
   
