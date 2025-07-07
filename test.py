@@ -139,6 +139,31 @@ def ecritures_csv(open_offers, output_file="processus_ouverts.csv"):
     except Exception as e:
         print("Exception lors de l’écriture :", e)
 
+def test()
+    import os, csv
+    
+    out = "test.csv"
+    abs_path = os.path.abspath(out)
+    print("📂 Répertoire courant :", os.getcwd())
+    print("📄 Chemin absolu du fichier :", abs_path)
+    
+    try:
+        with open(out, "w", encoding="utf-8", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["A","B"])
+            w.writerow([1,2])
+        print("✅ Écriture OK")
+    except Exception as e:
+        print("❌ Exception lors de l’écriture :", e)
+    
+    # Diagnostic
+    print("📋 Contenu du répertoire :", os.listdir(os.getcwd()))
+    try:
+        size = os.stat(out).st_size
+        print(f"📊 Taille de {out} : {size} octets")
+    except FileNotFoundError:
+        print("⚠️ Le fichier n'existe pas dans ce dossier.")
+
 
 if __name__ == "__main__":
     # 1) Scrape
