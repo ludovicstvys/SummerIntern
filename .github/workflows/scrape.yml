@@ -5,36 +5,52 @@ on:
     - cron: '0 * * * *'
   workflow_dispatch:
 
+# 1. autoriser l’écriture du GITHUB_TOKEN
+permissions:
+  contents: write
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      # 2. checkout avec persist-credentials
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: Setup Python & Playwright
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
-      - run: |
+
+      - name: Install dependencies
+        run: |
           pip install --upgrade pip
           pip install playwright
           python -m playwright install --with-deps
 
-      - name: Run scraper
+      - name: Run scraper and notify
         env:
-          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
-          SMTP_PORT:   ${{ secrets.SMTP_PORT }}
-          SMTP_USER:   ${{ secrets.SMTP_USER }}
-          SMTP_PASS_APP:   ${{ secrets.SMTP_PASS_APP }}
-          TO_ADDRS:    ${{ secrets.TO_ADDRS }}
-        run: |
-          python test.py
+          SMTP_SERVER:   ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT:     ${{ secrets.SMTP_PORT }}
+          SMTP_USER:     ${{ secrets.SMTP_USER }}
+          SMTP_PASS_APP: ${{ secrets.SMTP_PASS_APP }}
+          TO_ADDRS:      ${{ secrets.TO_ADDRS }}
+        run: python test.py
 
       - name: Commit and push updated CSV
+        # Ne commit que s'il y a vraiment un changement
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add processus_ouverts.csv
-          git diff --cached --quiet || (git commit -m "Mise à jour du CSV des internships" && git push)
+          # si git diff detecte un changement, on commit + push
+          if ! git diff --cached --quiet; then
+            git commit -m "Mise à jour du CSV des internships"
+            git push
+          else
+            echo "Aucun changement détecté dans processus_ouverts.csv, rien à push."
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
