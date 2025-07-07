@@ -29,14 +29,15 @@ jobs:
           server_address: ${{ Secrets.SMTP_SERVER }}   # ex smtp.gmail.com
           server_port:    ${{ Secrets.SMTP_PORT }}     # 587
           username:       ${{ Secrets.SMTP_USER }}
+          from: "torretotld@gmail.com"
+          to: ${{ Secrets.TO_ADDRS }}       # adresse(s) séparées par des virgules
+          # pièce jointe : le CSV généré par test.py
           password:       ${{ Secrets.SMTP_PASS_APP }} # *mot de passe d'application*
           subject:        "Summer Internships Ouverts"
           body:           |
             Bonjour,
 
             Vous trouverez en pièce jointe la liste des summer internships “Open”.
-          "from": torretotld@gmail.com
-          to: ${{ Secrets.TO_ADDRS }}       # adresse(s) séparées par des virgules
-          # pièce jointe : le CSV généré par test.py
+
           attachments:    processus_ouverts.csv
           secure:         true
