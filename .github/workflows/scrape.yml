@@ -21,7 +21,14 @@ jobs:
           python -m playwright install --with-deps
 
       - name: Run scraper
-        run: python test.py
+        env:
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT:   ${{ secrets.SMTP_PORT }}
+          SMTP_USER:   ${{ secrets.SMTP_USER }}
+          SMTP_PASS:   ${{ secrets.SMTP_PASS }}
+          TO_ADDRS:    ${{ secrets.TO_ADDRS }}
+        run: |
+          python test.py
 
       - name: Send email with results
         uses: dawidd6/action-send-mail@v3
@@ -30,7 +37,7 @@ jobs:
           server_port:    ${{ secrets.SMTP_PORT }}     # 587
           username:       ${{ secrets.SMTP_USER }}
           password:       ${{ secrets.SMTP_PASS_APP }} # mot de passe d’application
-          from:           "torretotld@gmail.com"
+          from:           ${{ secrets.SMTP_USER }}
           to:             ${{ secrets.TO_ADDRS }}      # plusieurs, séparées par des virgules
           subject:        "Summer Internships Ouverts"
           body: |
