@@ -77,7 +77,7 @@ def send_email(open_offers, old_procs, csv_path=None):
     SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
     SMTP_PORT   = os.getenv("SMTP_PORT")
     SMTP_USER   = os.getenv("SMTP_USER")
-    SMTP_PASS   = os.getenv("SMTP_PASS")
+    SMTP_PASS   = os.getenv("SMTP_PASS_APP")
     FROM_ADDR   = SMTP_USER
     raw_addrs = os.getenv("TO_ADDRS", "")
     TO_ADDRS  = [a.strip() for a in raw_addrs.split(",") if a.strip()]
@@ -100,11 +100,12 @@ def send_email(open_offers, old_procs, csv_path=None):
     # Connexion explicite et envoi
 
     smtp = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
-    smtp.set_debuglevel(1)
+    
     smtp.connect(SMTP_SERVER, SMTP_PORT)  # <— OBLIGATOIRE ici
     smtp.ehlo()
     smtp.starttls()
     smtp.ehlo()
+    smtp.set_debuglevel(1)
     smtp.login(SMTP_USER, SMTP_PASS)
     smtp.send_message(msg, from_addr=FROM_ADDR, to_addrs=TO_ADDRS)
     smtp.quit()
