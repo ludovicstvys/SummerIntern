@@ -137,6 +137,5 @@ if __name__ == "__main__":
     procs = read_process_csv("processus_ouverts.csv")
     print(procs)
     newprocs, oldprocs=new_process(offres,procs)
-    if len(newprocs)>0:
-        send_email(newprocs,oldprocs)
+    send_email(newprocs,oldprocs)
     csv_file = ecriture_csv(offres)
