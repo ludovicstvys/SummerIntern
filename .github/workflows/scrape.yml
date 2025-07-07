@@ -35,6 +35,7 @@ jobs:
             Bonjour,
 
             Vous trouverez en pièce jointe la liste des summer internships “Open”.
+          from:           ${{ secrets.SMTP_USER }}
           to:             ${{ secrets.TO_ADDRS }}       # adresse(s) séparées par des virgules
           # pièce jointe : le CSV généré par test.py
           attachments:    processus_ouverts.csv
