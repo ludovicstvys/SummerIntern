@@ -120,7 +120,7 @@ def new_process(offres, process):
     for comp, title, category, url in offres:
         a=0
         for i in range(len(procs)):
-            if procs[i]["Company"]==comp:
+            if "Company" in procs[i] and procs[i]["Company"]==comp:
                 a+=1
         if a==0:
             new_procs.append((comp,title, category, url))
