@@ -74,7 +74,11 @@ def ecriture_csv(open_offers, output_file="processus_ouverts.csv"):
 
 def send_email(open_offers, old_procs):
     SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    SMTP_PORT   = int(os.getenv("SMTP_PORT", 465))
+    port_str = os.getenv("SMTP_PORT")
+    if port_str and port_str.isdigit():
+        SMTP_PORT = int(port_str)
+    else:
+        SMTP_PORT = 465  # valeur par défaut si variable vide ou invalide
     SMTP_USER   = "torretotld@gmail.com"
     SMTP_PASS   = "ejah tjtv fkpi bmke"
     FROM_ADDR   = SMTP_USER
