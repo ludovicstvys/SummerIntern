@@ -98,7 +98,9 @@ def send_email(open_offers, old_procs, csv_path=None):
         msg.add_attachment(data, maintype="text", subtype="csv", filename=os.path.basename(csv_path))
 
     # Connexion explicite et envoi
+
     smtp = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
+    smtp.set_debuglevel(1)
     smtp.connect(SMTP_SERVER, SMTP_PORT)  # <— OBLIGATOIRE ici
     smtp.ehlo()
     smtp.starttls()
