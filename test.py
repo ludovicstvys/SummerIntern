@@ -128,17 +128,6 @@ def new_process(offres, process):
             old_procs.append((comp,title, category, url))
     return(new_procs, old_procs)
 
-def ecritures_csv(open_offers, output_file="processus_ouverts.csv"):
-    try:
-        with open("processus_ouverts.csv", "w", encoding="utf-8", newline="") as f:
-            import csv
-            w = csv.writer(f)
-            w.writerow(["A","B"])
-            w.writerow([1,2])
-        print("Écriture OK")
-    except Exception as e:
-        print("Exception lors de l’écriture :", e)
-
 if __name__ == "__main__":
     # 1) Scrape
     offres = scrape_open_summer_internships()
