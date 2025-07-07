@@ -79,7 +79,7 @@ def send_email(open_offers, old_procs):
     SMTP_USER   = "torretotld@gmail.com"
     SMTP_PASS   = "ejah tjtv fkpi bmke"
     FROM_ADDR   = SMTP_USER
-    TO_ADDRS    = "saintyves.ludovic@gmail.com"
+    TO_ADDRS    = ["saintyves.ludovic@gmail.com"]
 
     # Préparation du message
     body = "Voici la liste des summer internships:\n\n" + \
