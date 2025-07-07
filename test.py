@@ -139,7 +139,7 @@ def ecritures_csv(open_offers, output_file="processus_ouverts.csv"):
     except Exception as e:
         print("Exception lors de l’écriture :", e)
 
-def test()
+def test():
     import os, csv
     
     out = "test.csv"
