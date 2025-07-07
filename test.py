@@ -40,7 +40,6 @@ def scrape_open_summer_internships():
             prev_h = new_h
 
         browser.close()
-    print(internships)
     valid = [i for i in internships if isinstance(i, dict)]
     open_offers = []
     for i in valid:
