@@ -113,7 +113,6 @@ def send_email(open_offers, old_procs, csv_path=None):
 
     print(f"Email envoyé à : {TO_ADDRS}")
 
-    print(f"Email envoyé à : {TO_ADDRS}")
 
 def new_process(offres, process):
     new_procs=list()
@@ -130,13 +129,15 @@ def new_process(offres, process):
     return(new_procs, old_procs)
 
 def ecritures_csv(open_offers, output_file="processus_ouverts.csv"):
-    print(f"[DEBUG] J’écris {len(open_offers)} lignes dans {output_file}")
-    with open(output_file, mode="w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Company", "Title", "Category", "Url"])
-        writer.writerows(open_offers)
-    print(f"[DEBUG] Écriture terminée.")
-    return output_file
+    try:
+        with open("processus_ouverts.csv", "w", encoding="utf-8", newline="") as f:
+            import csv
+            w = csv.writer(f)
+            w.writerow(["A","B"])
+            w.writerow([1,2])
+        print("Écriture OK")
+    except Exception as e:
+        print("Exception lors de l’écriture :", e)
 
 
 if __name__ == "__main__":
