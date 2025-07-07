@@ -76,7 +76,7 @@ def send_email(open_offers, old_procs):
     # 1) Lecture des variables d’environnement
     SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
     port_str    = os.getenv("SMTP_PORT")
-    SMTP_PORT   = int(port_str) if port_str and port_str.isdigit() else 465
+    SMTP_PORT   = 587
     SMTP_USER   = "torretotld@gmail.com"
     SMTP_PASS   = "ejah tjtv fkpi bmke"
     FROM_ADDR   = SMTP_USER
