@@ -142,19 +142,30 @@ def ecritures_csv(open_offers, output_file="processus_ouverts.csv"):
 def test():
     import os, csv
     
-    out = "test.csv"
-    abs_path = os.path.abspath(out)
+    # (votre appel habituel)
+    csv_file = ecriture_csv(offres)
+    
+    # --- diagnostic immédiat ---
     print("📂 Répertoire courant :", os.getcwd())
-    print("📄 Chemin absolu du fichier :", abs_path)
+    print("📄 Chemin absolu du CSV :", os.path.abspath(csv_file))
     
     try:
-        with open(out, "w", encoding="utf-8", newline="") as f:
-            w = csv.writer(f)
-            w.writerow(["A","B"])
-            w.writerow([1,2])
-        print("✅ Écriture OK")
+        taille = os.stat(csv_file).st_size
+        print(f"📊 Taille de {csv_file} : {taille} octets")
+    except FileNotFoundError:
+        print(f"⚠️ {csv_file} n'existe pas !")
+    
+    # Lecture des premières lignes
+    try:
+        with open(csv_file, "r", encoding="utf-8") as f:
+            print("📋 Contenu (5 premières lignes) :")
+            for idx, ligne in enumerate(f):
+                print(f"Ligne {idx+1:02d}: {ligne.strip()}")
+                if idx >= 4:
+                    break
     except Exception as e:
-        print("❌ Exception lors de l’écriture :", e)
+        print("❌ Impossible de lire le fichier :", e)
+
     
     # Diagnostic
     print("📋 Contenu du répertoire :", os.listdir(os.getcwd()))
