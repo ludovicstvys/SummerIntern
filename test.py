@@ -112,12 +112,6 @@ def send_email(open_offers, old_procs, csv_path=None):
 
     print(f"Email envoyé à : {TO_ADDRS}")
 
-
-    # Envoi en précisant explicitement les destinataires
-    with smtplib.SMTP_SSL(SMTP_SERVER, SMTP_PORT) as smtp:
-        smtp.login(SMTP_USER, SMTP_PASS)
-        smtp.send_message(msg, from_addr=FROM_ADDR, to_addrs=TO_ADDRS)
-
     print(f"Email envoyé à : {TO_ADDRS}")
 
 def new_process(offres, process):
