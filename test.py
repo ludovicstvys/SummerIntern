@@ -75,11 +75,11 @@ def ecriture_csv(open_offers, output_file="processus_ouverts.csv"):
 def send_email(open_offers, old_procs, csv_path=None):
     # Lecture des vars d'env
     SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    SMTP_PORT   = 587  # STARTTLS
-    SMTP_USER   = "torretotld@gmail.com"
-    SMTP_PASS   = "ejah tjtv fkpi bmke"
+    SMTP_PORT   = os.getenv("SMTP_PORT")
+    SMTP_USER   = os.getenv("SMTP_USER")
+    SMTP_PASS   = os.getenv("SMTP_PASS")
     FROM_ADDR   = SMTP_USER
-    TO_ADDRS    = ["saintyves.ludovic@gmail.com"]
+    TO_ADDRS    = os.getenv("TO_ADDRS")
 
     # Préparation du message
     body = "Voici la liste des summer internships:\n\n" + \
