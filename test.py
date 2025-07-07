@@ -72,7 +72,7 @@ def ecriture_csv(open_offers, output_file="processus_ouverts.csv"):
     print(f"{len(open_offers)} offres exportées dans : {output_file}")
     return output_file
 
-def send_email(open_offers, old_procs):
+def send_email(open_offers, old_procs, csv_path=None):
     # Lecture des vars d'env
     SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
     SMTP_PORT   = 587  # STARTTLS
