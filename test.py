@@ -139,43 +139,6 @@ def ecritures_csv(open_offers, output_file="processus_ouverts.csv"):
     except Exception as e:
         print("Exception lors de l’écriture :", e)
 
-def test():
-    import os, csv
-    
-    # (votre appel habituel)
-    csv_file = ecriture_csv(offres)
-    
-    # --- diagnostic immédiat ---
-    print("📂 Répertoire courant :", os.getcwd())
-    print("📄 Chemin absolu du CSV :", os.path.abspath(csv_file))
-    
-    try:
-        taille = os.stat(csv_file).st_size
-        print(f"📊 Taille de {csv_file} : {taille} octets")
-    except FileNotFoundError:
-        print(f"⚠️ {csv_file} n'existe pas !")
-    
-    # Lecture des premières lignes
-    try:
-        with open(csv_file, "r", encoding="utf-8") as f:
-            print("📋 Contenu (5 premières lignes) :")
-            for idx, ligne in enumerate(f):
-                print(f"Ligne {idx+1:02d}: {ligne.strip()}")
-                if idx >= 4:
-                    break
-    except Exception as e:
-        print("❌ Impossible de lire le fichier :", e)
-
-    
-    # Diagnostic
-    print("📋 Contenu du répertoire :", os.listdir(os.getcwd()))
-    try:
-        size = os.stat(out).st_size
-        print(f"📊 Taille de {out} : {size} octets")
-    except FileNotFoundError:
-        print("⚠️ Le fichier n'existe pas dans ce dossier.")
-
-
 if __name__ == "__main__":
     # 1) Scrape
     offres = scrape_open_summer_internships()
@@ -187,4 +150,4 @@ if __name__ == "__main__":
         print("  →", o)
     csv_file = ecriture_csv(offres)
     ecritures_csv(offres)
-    test()
+  
