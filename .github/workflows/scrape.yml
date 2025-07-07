@@ -30,7 +30,7 @@ jobs:
           server_port:    ${{ secrets.SMTP_PORT }}     # 587
           username:       ${{ secrets.SMTP_USER }}
           password:       ${{ secrets.SMTP_PASS_APP }} # mot de passe d’application
-          from:           ${{ secrets.SMTP_USER }}     # <- adresse d’expédition
+          from:           "torretotld@gmail.com"
           to:             ${{ secrets.TO_ADDRS }}      # plusieurs, séparées par des virgules
           subject:        "Summer Internships Ouverts"
           body: |
