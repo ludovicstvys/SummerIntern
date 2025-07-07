@@ -26,18 +26,17 @@ jobs:
       - name: Send email with results
         uses: dawidd6/action-send-mail@v3
         with:
-          server_address: ${{ Secrets.SMTP_SERVER }}   # ex smtp.gmail.com
-          server_port:    ${{ Secrets.SMTP_PORT }}     # 587
-          username:       ${{ Secrets.SMTP_USER }}
-          from: "torretotld@gmail.com"
-          to: ${{ Secrets.TO_ADDRS }}       # adresse(s) séparées par des virgules
-          # pièce jointe : le CSV généré par test.py
-          password:       ${{ Secrets.SMTP_PASS_APP }} # *mot de passe d'application*
+          server_address: ${{ secrets.SMTP_SERVER }}   # ex : smtp.gmail.com
+          server_port:    ${{ secrets.SMTP_PORT }}     # 587
+          username:       ${{ secrets.SMTP_USER }}
+          password:       ${{ secrets.SMTP_PASS_APP }} # mot de passe d’application
+          from:           ${{ secrets.SMTP_USER }}     # <- adresse d’expédition
+          to:             ${{ secrets.TO_ADDRS }}      # plusieurs, séparées par des virgules
           subject:        "Summer Internships Ouverts"
-          body:           |
+          body: |
             Bonjour,
 
             Vous trouverez en pièce jointe la liste des summer internships “Open”.
-
-          attachments:    processus_ouverts.csv
+          attachments:    processus_ouverts.csv        # chemin relatif au repo
           secure:         true
+
