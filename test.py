@@ -129,6 +129,16 @@ def new_process(offres, process):
             old_procs.append((comp,title, category, url))
     return(new_procs, old_procs)
 
+def ecritures_csv(open_offers, output_file="processus_ouverts.csv"):
+    print(f"[DEBUG] J’écris {len(open_offers)} lignes dans {output_file}")
+    with open(output_file, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Company", "Title", "Category", "Url"])
+        writer.writerows(open_offers)
+    print(f"[DEBUG] Écriture terminée.")
+    return output_file
+
+
 if __name__ == "__main__":
     # 1) Scrape
     offres = scrape_open_summer_internships()
@@ -139,3 +149,4 @@ if __name__ == "__main__":
     for o in offres:
         print("  →", o)
     csv_file = ecriture_csv(offres)
+    ecritures_csv(offres)
