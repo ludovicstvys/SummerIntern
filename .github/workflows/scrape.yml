@@ -19,7 +19,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install playwright psutil
           python -m playwright install --with-deps
 
       - name: Run scraper
@@ -29,5 +29,6 @@ jobs:
           SMTP_USER:   ${{ secrets.SMTP_USER }}
           SMTP_PASS:   ${{ secrets.SMTP_PASS }}
           TO_ADDRS:    ${{ secrets.TO_ADDRS }}
+
         run: |
           python test.py
