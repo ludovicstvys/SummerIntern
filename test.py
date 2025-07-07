@@ -79,8 +79,8 @@ def send_email(open_offers, old_procs, csv_path=None):
     SMTP_USER   = os.getenv("SMTP_USER")
     SMTP_PASS   = os.getenv("SMTP_PASS")
     FROM_ADDR   = SMTP_USER
-    TO_ADDRS    = os.getenv("TO_ADDRS")
-
+    raw_addrs = os.getenv("TO_ADDRS", "")
+    TO_ADDRS  = [a.strip() for a in raw_addrs.split(",") if a.strip()]
     # Préparation du message
     body = "Voici la liste des summer internships:\n\n" + \
            "\n".join(f"• {comp} – {title} - {category} - {url}" for comp, title, category, url in open_offers)
