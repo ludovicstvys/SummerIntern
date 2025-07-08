@@ -81,7 +81,7 @@ def send_email(open_offers, old_procs,mail, csv_path=None):
     SMTP_PASS   = os.getenv("SMTP_PASS_APP")
     FROM_ADDR   = SMTP_USER
     raw_addrs = mail
-    TO_ADDRS  = [a.strip() for a in raw_addrs.split(",") if a.strip()]
+    TO_ADDRS  = mail
     # Préparation du message
     body = "Voici la liste des summer internships:\n\n" + \
            "\n".join(f"• {comp} – {title} - {category} - {url}" for comp, title, category, url in open_offers)
