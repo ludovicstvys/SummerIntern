@@ -58,6 +58,7 @@ def read_process_csv(csv_path):
     Lit le fichier CSV et retourne une liste de dicts.
     Chaque dict correspond à une ligne, avec pour clés les en-têtes de colonnes.
     """
+    processes=dict()
     with open(csv_path, mode="r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
         processes = [row for row in reader]
