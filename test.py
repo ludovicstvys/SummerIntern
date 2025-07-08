@@ -84,12 +84,13 @@ def send_email(open_offers, old_procs,mail, csv_path=None):
     raw_rows = mail
     TO_ADDRS  = [row['email'].strip() for row in raw_rows if row.get('email')]
     # Préparation du message
+    
     body = "Voici la liste des summer internships:\n\n" + \
            "\n".join(f"• {comp} – {title} - {category} - {url}" for comp, title, category, url in open_offers)
-    body+="\n Voici la liste des summer internships qui sont déjà ouverts:\n\n"+ \
+    body+="\n\n Voici la liste des summer internships qui sont déjà ouverts:\n\n"+ \
            "\n".join(f"• {comp} – {title} - {category} - {url}" for comp, title, category, url in old_procs)
     msg = EmailMessage()
-    msg["Subject"] = "Summer Internships ouverts"
+    msg["Subject"] = "Nouveau Process ouverts :".join(f"({comp}/)"for comp in open_offers)
     msg["From"]    = FROM_ADDR
     msg["To"]      = ", ".join(TO_ADDRS)
     msg.set_content(body)
