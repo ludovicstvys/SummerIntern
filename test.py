@@ -53,7 +53,7 @@ def scrape_open_summer_internships():
 
     return open_offers
 
-def read_process_csv(csv_path="processus_ouverts.csv"):
+def read_process_csv(csv_path):
     """
     Lit le fichier CSV et retourne une liste de dicts.
     Chaque dict correspond à une ligne, avec pour clés les en-têtes de colonnes.
@@ -73,14 +73,14 @@ def ecriture_csv(open_offers, output_file="processus_ouverts.csv"):
     print(f"{len(open_offers)} offres exportées dans : {output_file}")
     return output_file
 
-def send_email(open_offers, old_procs, csv_path=None):
+def send_email(open_offers, old_procs,mail, csv_path=None):
     # Lecture des vars d'env
     SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
     SMTP_PORT   = os.getenv("SMTP_PORT")
     SMTP_USER   = os.getenv("SMTP_USER")
     SMTP_PASS   = os.getenv("SMTP_PASS_APP")
     FROM_ADDR   = SMTP_USER
-    raw_addrs = os.getenv("TO_ADDRS", "")
+    raw_addrs = mail
     TO_ADDRS  = [a.strip() for a in raw_addrs.split(",") if a.strip()]
     # Préparation du message
     body = "Voici la liste des summer internships:\n\n" + \
@@ -134,6 +134,7 @@ if __name__ == "__main__":
     procs = read_process_csv("processus_ouverts.csv")
     newprocs, oldprocs=new_process(offres,procs)
     if len(newprocs)>0:
-        send_email(newprocs,oldprocs)
+        mail=read_process_csv("email.csv")
+        send_email(newprocs,oldprocs,mail)
     csv_file = ecriture_csv(offres)
   
