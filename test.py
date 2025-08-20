@@ -82,6 +82,10 @@ def send_email(open_offers, old_procs,mail, csv_path=None):
     SMTP_PASS   = os.getenv("SMTP_PASS_APP")
     FROM_ADDR   = SMTP_USER
     raw_rows = mail
+    print("SMTP_SERVER",SMTP_SERVER)
+    print("SMTP_PORT",SMTP_PORT)
+    print("SMTP_USER",SMTP_USER)
+    print("SMTP_PASS",SMTP_PASS)
     TO_ADDRS  = [row['email'].strip() for row in raw_rows if row.get('email')]
     # Préparation du message
     
