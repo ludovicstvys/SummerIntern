@@ -2,7 +2,7 @@ name: Scrape & Notify
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 # 1. autoriser l’écriture du GITHUB_TOKEN
