@@ -136,6 +136,7 @@ if __name__ == "__main__":
     newprocs, oldprocs=new_process(offres,procs)
     if len(newprocs)>0:
         mail=read_process_csv("email.csv")
-        send_email(newprocs,oldprocs,mail)
         csv_file = ecriture_csv(offres)
+        send_email(newprocs,oldprocs,mail,csv_file)
+        
   
