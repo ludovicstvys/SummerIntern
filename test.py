@@ -87,10 +87,8 @@ def send_email(open_offers, old_procs,mail, csv_path=None):
     
     body = "Voici la liste des summer internships:\n\n" + \
            "\n".join(f"• {comp} – {title} - {category} - {url}" for comp, title, category, url in open_offers)
-    body+="\n\n Voici la liste des summer internships qui sont déjà ouverts:\n\n"+ \
-           "\n".join(f"• {comp} – {title} - {category} - {url}\n" for comp, title, category, url in old_procs)
     msg = EmailMessage()
-    subject = "Nouveau Process ouverts"
+    subject = "Nouveau Summer ouvert"
     msg["Subject"] = subject 
     msg["From"]    = FROM_ADDR
     msg["To"]      = ", ".join(TO_ADDRS)
