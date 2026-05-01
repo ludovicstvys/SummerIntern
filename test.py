@@ -163,7 +163,7 @@ def fetch_existing_offers():
             payload["start_cursor"] = start_cursor
 
         response = requests.post(
-            f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query",
+            f"https://api.notion.com/v1/data_sources/{NOTION_DATABASE_ID}/query",
             headers=headers,
             json=payload,
             timeout=30,
