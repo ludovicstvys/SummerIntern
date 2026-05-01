@@ -4,8 +4,12 @@ import os
 import requests
 from datetime import datetime, timezone
 
-NOTION_API_VERSION = "2022-06-28"
-NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "bffe10ddc8514e3dbf6591b8aadb9736")
+NOTION_API_VERSION = "2025-09-03"
+NOTION_DATA_SOURCE_ID = (
+    os.getenv("NOTION_DATA_SOURCE_ID")
+    or os.getenv("NOTION_DATABASE_ID")
+    or "5b52ea1d-b510-4d17-a9e7-9a72c9fb976b"
+)
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 
 
@@ -16,6 +20,14 @@ def iso_to_date(value):
         return datetime.fromisoformat(value.replace("Z", "+00:00")).date().isoformat()
     except Exception:
         return None
+
+
+def raise_for_notion(response, context):
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        print(f"{context} failed with {response.status_code}: {response.text}")
+        raise exc
 
 def scrape_open_summer_internships():
     URL = "https://app.the-trackr.com/uk-finance/summer-internships"
@@ -121,7 +133,7 @@ def ecriture_csv(open_offers, output_file="processus_ouverts.csv"):
 
 def notion_payload(offer):
     return {
-        "parent": {"database_id": NOTION_DATABASE_ID},
+        "parent": {"data_source_id": NOTION_DATA_SOURCE_ID},
         "properties": {
             "Name": {"title": [{"text": {"content": offer["name"] or "Untitled"}}]},
             "Company": {"rich_text": [{"text": {"content": offer["company"] or ""}}]},
@@ -152,20 +164,17 @@ def fetch_existing_offers():
     start_cursor = None
 
     while True:
-        payload = {
-            "page_size": 100,
-            "filter_properties": ["Offer URL", "Opening Date", "Status"],
-        }
+        payload = {"page_size": 100}
         if start_cursor:
             payload["start_cursor"] = start_cursor
 
         response = requests.post(
-            f"https://api.notion.com/v1/data_sources/{NOTION_DATABASE_ID}/query",
+            f"https://api.notion.com/v1/data_sources/{NOTION_DATA_SOURCE_ID}/query",
             headers=headers,
             json=payload,
             timeout=30,
         )
-        response.raise_for_status()
+        raise_for_notion(response, "Notion data source query")
         data = response.json()
 
         for page in data.get("results", []):
@@ -244,14 +253,14 @@ def sync_to_notion(open_offers):
                 json={"properties": payload["properties"]},
                 timeout=30,
             )
-            response.raise_for_status()
+            raise_for_notion(response, f"Notion page update {page_id}")
             updated += 1
             existing_offers[offer_url]["opening_date"] = incoming_opening_date or previous_opening_date
         else:
             if offer.get("opening_date"):
                 payload["properties"]["Status"] = {"status": {"name": "Closed"}}
             response = requests.post("https://api.notion.com/v1/pages", headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
+            raise_for_notion(response, "Notion page create")
             if offer_url:
                 existing_offers[offer_url] = {
                     "page_id": response.json().get("id"),
