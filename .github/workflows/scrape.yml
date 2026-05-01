@@ -1,4 +1,4 @@
-name: Scrape & Notify
+name: Scrape Notion
 
 on:
   schedule:
@@ -7,17 +7,14 @@ on:
 
 # 1. autoriser l’écriture du GITHUB_TOKEN
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     steps:
-      # 2. checkout avec persist-credentials
       - name: Checkout repo
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
       - name: Setup Python & Playwright
         uses: actions/setup-python@v4
@@ -27,30 +24,11 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install playwright
+          pip install playwright requests
           python -m playwright install --with-deps
 
-      - name: Run scraper and notify
+      - name: Run scraper and sync to Notion
         env:
-          SMTP_SERVER:   ${{ secrets.SMTP_SERVER }}
-          SMTP_PORT:     ${{ secrets.SMTP_PORT }}
-          SMTP_USER:     ${{ secrets.SMTP_USER }}
-          SMTP_PASS_APP: ${{ secrets.SMTP_PASS_APP }}
-          TO_ADDRS:      ${{ secrets.TO_ADDRS }}
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         run: python test.py
-
-      - name: Commit and push updated CSV
-        # Ne commit que s'il y a vraiment un changement
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add processus_ouverts.csv
-          # si git diff detecte un changement, on commit + push
-          if ! git diff --cached --quiet; then
-            git commit -m "Mise à jour du CSV des internships"
-            git push
-          else
-            echo "Aucun changement détecté dans processus_ouverts.csv, rien à push."
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

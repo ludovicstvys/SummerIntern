@@ -1,8 +1,21 @@
 from playwright.sync_api import sync_playwright
 import csv
-import smtplib
-from email.message import EmailMessage
 import os
+import requests
+from datetime import datetime, timezone
+
+NOTION_API_VERSION = "2022-06-28"
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "bffe10ddc8514e3dbf6591b8aadb9736")
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+
+
+def iso_to_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date().isoformat()
+    except Exception:
+        return None
 
 def scrape_open_summer_internships():
     URL = "https://app.the-trackr.com/uk-finance/summer-internships"
@@ -46,10 +59,26 @@ def scrape_open_summer_internships():
         if i.get("openingDate") is not None:
             company  = i.get("company")
             title = (i.get("name") or "").strip()
-            comp = company.get("name")
-            category = (i.get("category") or "").strip()
+            comp = (company or {}).get("name")
+            company_id = (company or {}).get("id")
+            categories = i.get("categories") or []
             url = (i.get("url")      or "").strip()
-            open_offers.append((comp, title, category, url))
+            open_offers.append({
+                "name": title,
+                "company": comp,
+                "company_id": company_id,
+                "offer_url": url,
+                "region": i.get("region"),
+                "categories": categories,
+                "opening_date": iso_to_date(i.get("openingDate")),
+                "closing_date": iso_to_date(i.get("closingDate")),
+                "stage": i.get("currentStage") or "Unknown",
+                "rolling": bool(i.get("rolling")),
+                "needs_cv": bool(i.get("cv")),
+                "needs_cover_letter": bool(i.get("coverLetter") == "Yes"),
+                "company_description": (company or {}).get("description"),
+                "notes": i.get("notes"),
+            })
 
     return open_offers
 
@@ -67,76 +96,194 @@ def read_process_csv(csv_path):
 
 def ecriture_csv(open_offers, output_file="processus_ouverts.csv"):
     with open(output_file, mode="w", newline="", encoding="utf-8") as f:
-        print("wow")
         writer = csv.writer(f)
-        writer.writerow(["Company", "Title", "Category", "Url"])
-        writer.writerows(open_offers)
+        writer.writerow(["Name", "Company", "Company ID", "Offer URL", "Region", "Categories", "Opening Date", "Closing Date", "Stage", "Rolling", "Needs CV", "Needs Cover Letter", "Company Description", "Notes"])
+        for offer in open_offers:
+            writer.writerow([
+                offer["name"],
+                offer["company"],
+                offer["company_id"],
+                offer["offer_url"],
+                offer["region"],
+                ",".join(offer["categories"]) if isinstance(offer["categories"], list) else offer["categories"],
+                offer["opening_date"],
+                offer["closing_date"],
+                offer["stage"],
+                offer["rolling"],
+                offer["needs_cv"],
+                offer["needs_cover_letter"],
+                offer["company_description"],
+                offer["notes"],
+            ])
     print(f"{len(open_offers)} offres exportées dans : {output_file}")
     return output_file
 
-def send_email(open_offers, old_procs,mail, csv_path=None):
-    # Lecture des vars d'env
-    SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    SMTP_PORT   = os.getenv("SMTP_PORT")
-    SMTP_USER   = os.getenv("SMTP_USER")
-    SMTP_PASS   = os.getenv("SMTP_PASS_APP")
-    FROM_ADDR   = SMTP_USER
-    raw_rows = mail
-    TO_ADDRS  = [row['email'].strip() for row in raw_rows if row.get('email')]
-    # Préparation du message
-    
-    body = "Voici la liste des summer internships:\n\n" + \
-           "\n".join(f"• {comp} – {title} - {category} - {url}" for comp, title, category, url in open_offers)
-    msg = EmailMessage()
-    subject = "Nouveau Summer ouvert"
-    msg["Subject"] = subject 
-    msg["From"]    = FROM_ADDR
-    msg["To"]      = ", ".join(TO_ADDRS)
-    msg.set_content(body)
 
-    if csv_path:
-        with open(csv_path, "rb") as f:
-            data = f.read()
-        msg.add_attachment(data, maintype="text", subtype="csv", filename=os.path.basename(csv_path))
-
-    # Connexion explicite et envoi
-
-    smtp = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
-    
-    smtp.connect(SMTP_SERVER, SMTP_PORT)  # <— OBLIGATOIRE ici
-    smtp.ehlo()
-    smtp.starttls()
-    smtp.ehlo()
-    smtp.set_debuglevel(1)
-    smtp.login(SMTP_USER, SMTP_PASS)
-    smtp.send_message(msg, from_addr=FROM_ADDR, to_addrs=TO_ADDRS)
-    smtp.quit()
-
-    print(f"Email envoyé à : {TO_ADDRS}")
+def notion_payload(offer):
+    return {
+        "parent": {"database_id": NOTION_DATABASE_ID},
+        "properties": {
+            "Name": {"title": [{"text": {"content": offer["name"] or "Untitled"}}]},
+            "Company": {"rich_text": [{"text": {"content": offer["company"] or ""}}]},
+            "Company ID": {"rich_text": [{"text": {"content": offer["company_id"] or ""}}]},
+            "Offer URL": {"url": offer["offer_url"] or None},
+            "Region": {"select": {"name": offer["region"] or "Other"}},
+            "Categories": {"multi_select": [{"name": c} for c in (offer["categories"] or [])]},
+            "Opening Date": {"date": {"start": offer["opening_date"]} if offer["opening_date"] else None},
+            "Closing Date": {"date": {"start": offer["closing_date"]} if offer["closing_date"] else None},
+            "Stage": {"select": {"name": offer["stage"] or "Unknown"}},
+            "Rolling": {"checkbox": bool(offer["rolling"])},
+            "Needs CV": {"checkbox": bool(offer["needs_cv"])},
+            "Needs Cover Letter": {"checkbox": bool(offer["needs_cover_letter"])},
+            "Company Description": {"rich_text": [{"text": {"content": offer["company_description"] or ""}}]},
+            "Notes": {"rich_text": [{"text": {"content": offer["notes"] or ""}}]},
+        },
+    }
 
 
-def new_process(offres, process):
-    new_procs=list()
-    old_procs=list()
-    for comp, title, category, url in offres:
-        a=0
-        for i in range(len(procs)):
-            if "Company" in procs[i] and procs[i]["Company"]==comp:
-                a+=1
-        if a==0:
-            new_procs.append((comp,title, category, url))
+def fetch_existing_offers():
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Notion-Version": NOTION_API_VERSION,
+        "Content-Type": "application/json",
+    }
+
+    existing_offers = {}
+    start_cursor = None
+
+    while True:
+        payload = {
+            "page_size": 100,
+            "filter": {
+                "property": "Offer URL",
+                "url": {"is_not_empty": True},
+            },
+        }
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
+
+        response = requests.post(
+            f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        for page in data.get("results", []):
+            properties = page.get("properties", {})
+            url_prop = properties.get("Offer URL", {}).get("url")
+            opening_prop = properties.get("Opening Date", {}).get("date")
+            status_prop = properties.get("Status", {}).get("status")
+            if url_prop:
+                existing_offers[url_prop.strip()] = {
+                    "page_id": page.get("id"),
+                    "opening_date": (opening_prop or {}).get("start"),
+                    "status": (status_prop or {}).get("name"),
+                }
+
+        if not data.get("has_more"):
+            break
+        start_cursor = data.get("next_cursor")
+
+    return existing_offers
+
+
+def deduplicate_offers(open_offers):
+    seen = set()
+    deduped = []
+    skipped_duplicates = 0
+    skipped_no_url = 0
+    for offer in open_offers:
+        url = (offer.get("offer_url") or "").strip()
+        if not url or url in seen:
+            if not url:
+                skipped_no_url += 1
+            else:
+                skipped_duplicates += 1
+            continue
+        seen.add(url)
+        deduped.append(offer)
+    print(f"Deduplication: {len(deduped)} gardées, {skipped_duplicates} doublons ignorés, {skipped_no_url} sans URL ignorées")
+    return deduped
+
+
+def sync_to_notion(open_offers):
+    if not NOTION_TOKEN:
+        raise RuntimeError("Missing NOTION_TOKEN environment variable")
+
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Notion-Version": NOTION_API_VERSION,
+        "Content-Type": "application/json",
+    }
+
+    existing_offers = fetch_existing_offers()
+    created = 0
+    updated = 0
+    opened = 0
+    skipped_no_url = 0
+    for offer in open_offers:
+        payload = notion_payload(offer)
+        for key in ["Opening Date", "Closing Date"]:
+            if payload["properties"][key] is None:
+                del payload["properties"][key]
+        offer_url = (offer.get("offer_url") or "").strip()
+        if not offer_url:
+            skipped_no_url += 1
+            continue
+        existing = existing_offers.get(offer_url)
+        if existing:
+            page_id = existing["page_id"]
+            incoming_opening_date = offer.get("opening_date")
+            previous_opening_date = existing.get("opening_date")
+            if incoming_opening_date and not previous_opening_date:
+                payload["properties"]["Status"] = {"status": {"name": "Opened"}}
+                opened += 1
+            response = requests.patch(
+                f"https://api.notion.com/v1/pages/{page_id}",
+                headers=headers,
+                json={"properties": payload["properties"]},
+                timeout=30,
+            )
+            response.raise_for_status()
+            updated += 1
+            existing_offers[offer_url]["opening_date"] = incoming_opening_date or previous_opening_date
         else:
-            old_procs.append((comp,title, category, url))
-    return(new_procs, old_procs)
+            if offer.get("opening_date"):
+                payload["properties"]["Status"] = {"status": {"name": "Closed"}}
+            response = requests.post("https://api.notion.com/v1/pages", headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+            if offer_url:
+                existing_offers[offer_url] = {
+                    "page_id": response.json().get("id"),
+                    "opening_date": offer.get("opening_date"),
+                    "status": "Closed",
+                }
+            created += 1
+
+    print(f"Notion sync: {created} créées, {updated} mises à jour, {opened} passées à Opened, {skipped_no_url} sans URL ignorées")
+
+
+def log_run_summary(open_offers):
+    total = len(open_offers)
+    companies = len({(offer.get("company") or "").strip() for offer in open_offers if (offer.get("company") or "").strip()})
+    stages = {}
+    regions = {}
+    for offer in open_offers:
+        stage = offer.get("stage") or "Unknown"
+        region = offer.get("region") or "Other"
+        stages[stage] = stages.get(stage, 0) + 1
+        regions[region] = regions.get(region, 0) + 1
+
+    print(f"Run summary: {total} offres, {companies} entreprises")
+    print(f"Stages: {stages}")
+    print(f"Regions: {regions}")
 
 if __name__ == "__main__":
-    # 1) Scrape
-    offres = scrape_open_summer_internships()
-    procs = read_process_csv("processus_ouverts.csv")
-    newprocs, oldprocs=new_process(offres,procs)
-    if len(newprocs)>0:
-        mail=read_process_csv("email.csv")
-        csv_file = ecriture_csv(offres)
-        send_email(newprocs,oldprocs,mail,csv_file)
-        
+    offres = deduplicate_offers(scrape_open_summer_internships())
+    log_run_summary(offres)
+    ecriture_csv(offres)
+    sync_to_notion(offres)
   
