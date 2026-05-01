@@ -30,6 +30,5 @@ jobs:
       - name: Run scraper and sync to Notion
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          NOTION_DATA_SOURCE_ID: 5b52ea1d-b510-4d17-a9e7-9a72c9fb976b
         run: python test.py

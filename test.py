@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 NOTION_API_VERSION = "2025-09-03"
 NOTION_DATA_SOURCE_ID = (
     os.getenv("NOTION_DATA_SOURCE_ID")
-    or os.getenv("NOTION_DATABASE_ID")
     or "5b52ea1d-b510-4d17-a9e7-9a72c9fb976b"
 )
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
