@@ -154,10 +154,7 @@ def fetch_existing_offers():
     while True:
         payload = {
             "page_size": 100,
-            "filter": {
-                "property": "Offer URL",
-                "url": {"is_not_empty": True},
-            },
+            "filter_properties": ["Offer URL", "Opening Date", "Status"],
         }
         if start_cursor:
             payload["start_cursor"] = start_cursor
