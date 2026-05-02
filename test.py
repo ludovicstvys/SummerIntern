@@ -2,14 +2,21 @@ from playwright.sync_api import sync_playwright
 import csv
 import os
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 NOTION_API_VERSION = "2025-09-03"
-NOTION_DATA_SOURCE_ID = (
-    os.getenv("NOTION_DATA_SOURCE_ID")
-    or "5b52ea1d-b510-4d17-a9e7-9a72c9fb976b"
-)
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+
+
+def required_env(name):
+    value = os.getenv(name)
+    if not value:
+        raise RuntimeError(f"Missing {name} environment variable")
+    return value
+
+
+NOTION_TOKEN = required_env("NOTION_TOKEN")
+NOTION_DATA_SOURCE_ID = required_env("NOTION_DATA_SOURCE_ID")
+TODO_DATA_SOURCE_ID = required_env("TODO_DATA_SOURCE_ID")
 
 
 def iso_to_date(value):
@@ -21,11 +28,26 @@ def iso_to_date(value):
         return None
 
 
+def add_days(date_value, days):
+    if not date_value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(date_value.replace("Z", "+00:00")).date()
+        return (parsed + timedelta(days=days)).isoformat()
+    except Exception:
+        return None
+
+
 def raise_for_notion(response, context):
     try:
         response.raise_for_status()
     except requests.HTTPError as exc:
         print(f"{context} failed with {response.status_code}: {response.text}")
+        if response.status_code == 404:
+            print(
+                "Notion access hint: the data source is either the wrong ID "
+                "or it has not been shared with the integration attached to NOTION_TOKEN."
+            )
         raise exc
 
 def scrape_open_summer_internships():
@@ -152,6 +174,27 @@ def notion_payload(offer):
     }
 
 
+def todo_payload(offer, opened_on, due_on):
+    task_name = f"TODO - {offer['company'] or 'Unknown company'} - {offer['name'] or 'Untitled'}"
+    payload = {
+        "parent": {"data_source_id": TODO_DATA_SOURCE_ID},
+        "properties": {
+            "Task": {"title": [{"text": {"content": task_name}}]},
+            "Company": {"rich_text": [{"text": {"content": offer["company"] or ""}}]},
+            "Offer URL": {"url": offer["offer_url"] or None},
+            "Trigger Stage": {"rich_text": [{"text": {"content": offer["stage"] or "Unknown"}}]},
+            "Opened On": {"date": {"start": opened_on} if opened_on else None},
+            "Due": {"date": {"start": due_on} if due_on else None},
+            "Status": {"select": {"name": "To-do"}},
+            "Notes": {"rich_text": [{"text": {"content": offer["notes"] or ""}}]},
+        },
+    }
+    for key in ["Company", "Offer URL", "Trigger Stage", "Opened On", "Due", "Notes"]:
+        if payload["properties"][key] is None:
+            del payload["properties"][key]
+    return payload
+
+
 def fetch_existing_offers():
     headers = {
         "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -195,6 +238,47 @@ def fetch_existing_offers():
     return existing_offers
 
 
+def fetch_existing_todos():
+    headers = {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Notion-Version": NOTION_API_VERSION,
+        "Content-Type": "application/json",
+    }
+
+    existing_todos = {}
+    start_cursor = None
+
+    while True:
+        payload = {"page_size": 100}
+        if start_cursor:
+            payload["start_cursor"] = start_cursor
+
+        response = requests.post(
+            f"https://api.notion.com/v1/data_sources/{TODO_DATA_SOURCE_ID}/query",
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        raise_for_notion(response, "Notion todo data source query")
+        data = response.json()
+
+        for page in data.get("results", []):
+            properties = page.get("properties", {})
+            url_prop = properties.get("Offer URL", {}).get("url")
+            due_prop = properties.get("Due", {}).get("date")
+            if url_prop:
+                existing_todos[url_prop.strip()] = {
+                    "page_id": page.get("id"),
+                    "due": (due_prop or {}).get("start"),
+                }
+
+        if not data.get("has_more"):
+            break
+        start_cursor = data.get("next_cursor")
+
+    return existing_todos
+
+
 def deduplicate_offers(open_offers):
     seen = set()
     deduped = []
@@ -225,9 +309,12 @@ def sync_to_notion(open_offers):
     }
 
     existing_offers = fetch_existing_offers()
+    existing_todos = fetch_existing_todos()
     created = 0
     updated = 0
     opened = 0
+    todo_created = 0
+    todo_updated = 0
     skipped_no_url = 0
     for offer in open_offers:
         payload = notion_payload(offer)
@@ -243,7 +330,8 @@ def sync_to_notion(open_offers):
             page_id = existing["page_id"]
             incoming_opening_date = offer.get("opening_date")
             previous_opening_date = existing.get("opening_date")
-            if incoming_opening_date and not previous_opening_date:
+            newly_opened = bool(incoming_opening_date and not previous_opening_date)
+            if newly_opened:
                 payload["properties"]["Status"] = {"status": {"name": "Opened"}}
                 opened += 1
             response = requests.patch(
@@ -255,6 +343,33 @@ def sync_to_notion(open_offers):
             raise_for_notion(response, f"Notion page update {page_id}")
             updated += 1
             existing_offers[offer_url]["opening_date"] = incoming_opening_date or previous_opening_date
+            if newly_opened:
+                due_date = add_days(incoming_opening_date, 2)
+                todo_existing = existing_todos.get(offer_url)
+                todo_request = todo_payload(offer, incoming_opening_date, due_date)
+                if todo_existing:
+                    todo_page_id = todo_existing["page_id"]
+                    response = requests.patch(
+                        f"https://api.notion.com/v1/pages/{todo_page_id}",
+                        headers=headers,
+                        json={"properties": todo_request["properties"]},
+                        timeout=30,
+                    )
+                    raise_for_notion(response, f"Notion todo update {todo_page_id}")
+                    todo_updated += 1
+                else:
+                    response = requests.post(
+                        "https://api.notion.com/v1/pages",
+                        headers=headers,
+                        json=todo_request,
+                        timeout=30,
+                    )
+                    raise_for_notion(response, "Notion todo create")
+                    existing_todos[offer_url] = {
+                        "page_id": response.json().get("id"),
+                        "due": due_date,
+                    }
+                    todo_created += 1
         else:
             if offer.get("opening_date"):
                 payload["properties"]["Status"] = {"status": {"name": "Closed"}}
@@ -268,7 +383,12 @@ def sync_to_notion(open_offers):
                 }
             created += 1
 
-    print(f"Notion sync: {created} créées, {updated} mises à jour, {opened} passées à Opened, {skipped_no_url} sans URL ignorées")
+    print(
+        "Notion sync: "
+        f"{created} créées, {updated} mises à jour, {opened} passées à Opened, "
+        f"{todo_created} todos créés, {todo_updated} todos mis à jour, "
+        f"{skipped_no_url} sans URL ignorées"
+    )
 
 
 def log_run_summary(open_offers):
