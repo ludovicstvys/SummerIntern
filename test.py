@@ -5,18 +5,13 @@ import requests
 from datetime import datetime, timezone, timedelta
 
 NOTION_API_VERSION = "2025-09-03"
-
-
-def required_env(name):
-    value = os.getenv(name)
-    if not value:
-        raise RuntimeError(f"Missing {name} environment variable")
-    return value
-
-
-NOTION_TOKEN = required_env("NOTION_TOKEN")
-NOTION_DATA_SOURCE_ID = required_env("NOTION_DATA_SOURCE_ID")
-TODO_DATA_SOURCE_ID = required_env("TODO_DATA_SOURCE_ID")
+NOTION_DATA_SOURCE_ID = (
+    os.getenv("NOTION_DATA_SOURCE_ID")
+)
+TODO_DATA_SOURCE_ID = (
+    os.getenv("TODO_DATA_SOURCE_ID")
+)
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 
 
 def iso_to_date(value):
