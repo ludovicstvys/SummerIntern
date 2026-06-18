@@ -536,7 +536,19 @@ def sync_to_notion(open_offers):
     }
 
     existing_offers = fetch_existing_offers()
-    existing_todos = fetch_existing_todos()
+    todos_enabled = bool(TODO_DATA_SOURCE_ID)
+    existing_todos = {}
+    if todos_enabled:
+        try:
+            existing_todos = fetch_existing_todos()
+        except requests.HTTPError:
+            todos_enabled = False
+            print(
+                "Todo sync skipped: TODO_DATA_SOURCE_ID is not accessible. "
+                "Check that the ID is correct and shared with the Notion integration."
+            )
+    else:
+        print("Todo sync skipped: missing TODO_DATA_SOURCE_ID environment variable")
     created = 0
     updated = 0
     opened = 0
@@ -570,7 +582,7 @@ def sync_to_notion(open_offers):
             raise_for_notion(response, f"Notion page update {page_id}")
             updated += 1
             existing_offers[offer_url]["opening_date"] = incoming_opening_date or previous_opening_date
-            if newly_opened:
+            if newly_opened and todos_enabled:
                 due_date = add_days(incoming_opening_date, 2)
                 todo_existing = existing_todos.get(offer_url)
                 todo_request = todo_payload(offer, incoming_opening_date, due_date)
