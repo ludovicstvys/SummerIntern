@@ -7,14 +7,15 @@ from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from html import escape
 
+def clean_env(name, default=None):
+    value = os.getenv(name, default)
+    return value.strip() if isinstance(value, str) else value
+
+
 NOTION_API_VERSION = "2025-09-03"
-NOTION_DATA_SOURCE_ID = (
-    os.getenv("NOTION_DATA_SOURCE_ID")
-)
-TODO_DATA_SOURCE_ID = (
-    os.getenv("TODO_DATA_SOURCE_ID")
-)
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+NOTION_DATA_SOURCE_ID = clean_env("NOTION_DATA_SOURCE_ID")
+TODO_DATA_SOURCE_ID = clean_env("TODO_DATA_SOURCE_ID")
+NOTION_TOKEN = clean_env("NOTION_TOKEN")
 
 CSV_COLUMNS = [
     "Name",
@@ -184,7 +185,7 @@ def detect_new_offers(open_offers, previous_rows):
 
 
 def read_email_recipients(csv_path="email.csv"):
-    env_recipients = os.getenv("TO_ADDRS") or os.getenv("MAIL_TO_ADDRS")
+    env_recipients = clean_env("TO_ADDRS") or clean_env("MAIL_TO_ADDRS")
     recipients = []
     if env_recipients:
         recipients.extend(
@@ -330,11 +331,11 @@ def build_email_html(open_offers):
 
 
 def send_email(open_offers, csv_path=None):
-    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port = int(os.getenv("SMTP_PORT", "587"))
-    smtp_user = os.getenv("SMTP_USER")
-    smtp_pass = os.getenv("SMTP_PASS_APP") or os.getenv("SMTP_PASS")
-    from_addr = os.getenv("FROM_ADDR") or smtp_user
+    smtp_server = clean_env("SMTP_SERVER", "smtp.gmail.com")
+    smtp_port = int(clean_env("SMTP_PORT", "587"))
+    smtp_user = clean_env("SMTP_USER")
+    smtp_pass = clean_env("SMTP_PASS_APP") or clean_env("SMTP_PASS")
+    from_addr = clean_env("FROM_ADDR") or smtp_user
     to_addrs = read_email_recipients()
 
     missing = [
