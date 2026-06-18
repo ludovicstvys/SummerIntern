@@ -2,6 +2,7 @@ from playwright.sync_api import sync_playwright
 import csv
 import smtplib
 import os
+import re
 import requests
 from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
@@ -185,23 +186,33 @@ def detect_new_offers(open_offers, previous_rows):
 
 
 def read_email_recipients(csv_path="email.csv"):
-    env_recipients = clean_env("TO_ADDRS") or clean_env("MAIL_TO_ADDRS")
     recipients = []
-    if env_recipients:
-        recipients.extend(
-            recipient.strip()
-            for recipient in env_recipients.replace(";", ",").split(",")
-            if recipient.strip()
-        )
 
     if os.path.exists(csv_path):
-        recipients.extend(
-            row["email"].strip()
-            for row in read_process_csv(csv_path)
-            if row.get("email") and row["email"].strip()
-        )
+        with open(csv_path, mode="r", encoding="utf-8-sig", newline="") as f:
+            sample = f.read(2048)
+            f.seek(0)
+            has_header = csv.Sniffer().has_header(sample) if sample.strip() else False
+            if has_header:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    for column, value in row.items():
+                        if column and column.strip().lower() in {"email", "emails", "mail", "recipient", "recipients"}:
+                            recipients.extend(extract_email_addresses(value))
+            else:
+                recipients.extend(extract_email_addresses(f.read()))
+
+    env_recipients = clean_env("TO_ADDRS") or clean_env("MAIL_TO_ADDRS")
+    if env_recipients:
+        recipients.extend(extract_email_addresses(env_recipients))
 
     return sorted(set(recipients))
+
+
+def extract_email_addresses(value):
+    if not value:
+        return []
+    return re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", value)
 
 
 def format_offer_for_email(offer):
@@ -344,7 +355,7 @@ def send_email(open_offers, csv_path=None):
             "SMTP_USER": smtp_user,
             "SMTP_PASS_APP or SMTP_PASS": smtp_pass,
             "FROM_ADDR or SMTP_USER": from_addr,
-            "TO_ADDRS, MAIL_TO_ADDRS, or email.csv": to_addrs,
+            "email.csv, TO_ADDRS, or MAIL_TO_ADDRS": to_addrs,
         }.items()
         if not value
     ]

@@ -38,7 +38,6 @@ jobs:
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS_APP: ${{ secrets.SMTP_PASS_APP }}
-          TO_ADDRS: ${{ secrets.TO_ADDRS }}
         run: python test.py
 
       - name: Commit and push updated CSV
