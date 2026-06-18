@@ -190,17 +190,7 @@ def read_email_recipients(csv_path="email.csv"):
 
     if os.path.exists(csv_path):
         with open(csv_path, mode="r", encoding="utf-8-sig", newline="") as f:
-            sample = f.read(2048)
-            f.seek(0)
-            has_header = csv.Sniffer().has_header(sample) if sample.strip() else False
-            if has_header:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    for column, value in row.items():
-                        if column and column.strip().lower() in {"email", "emails", "mail", "recipient", "recipients"}:
-                            recipients.extend(extract_email_addresses(value))
-            else:
-                recipients.extend(extract_email_addresses(f.read()))
+            recipients.extend(extract_email_addresses(f.read()))
 
     env_recipients = clean_env("TO_ADDRS") or clean_env("MAIL_TO_ADDRS")
     if env_recipients:
