@@ -1,8 +1,11 @@
 from playwright.sync_api import sync_playwright
 import csv
+import smtplib
 import os
 import requests
 from datetime import datetime, timezone, timedelta
+from email.message import EmailMessage
+from html import escape
 
 NOTION_API_VERSION = "2025-09-03"
 NOTION_DATA_SOURCE_ID = (
@@ -12,6 +15,23 @@ TODO_DATA_SOURCE_ID = (
     os.getenv("TODO_DATA_SOURCE_ID")
 )
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+
+CSV_COLUMNS = [
+    "Name",
+    "Company",
+    "Company ID",
+    "Offer URL",
+    "Region",
+    "Categories",
+    "Opening Date",
+    "Closing Date",
+    "Stage",
+    "Rolling",
+    "Needs CV",
+    "Needs Cover Letter",
+    "Company Description",
+    "Notes",
+]
 
 
 def iso_to_date(value):
@@ -115,6 +135,8 @@ def read_process_csv(csv_path):
     Lit le fichier CSV et retourne une liste de dicts.
     Chaque dict correspond à une ligne, avec pour clés les en-têtes de colonnes.
     """
+    if not os.path.exists(csv_path):
+        return []
     processes=dict()
     with open(csv_path, mode="r", encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
@@ -125,7 +147,7 @@ def read_process_csv(csv_path):
 def ecriture_csv(open_offers, output_file="processus_ouverts.csv"):
     with open(output_file, mode="w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["Name", "Company", "Company ID", "Offer URL", "Region", "Categories", "Opening Date", "Closing Date", "Stage", "Rolling", "Needs CV", "Needs Cover Letter", "Company Description", "Notes"])
+        writer.writerow(CSV_COLUMNS)
         for offer in open_offers:
             writer.writerow([
                 offer["name"],
@@ -145,6 +167,215 @@ def ecriture_csv(open_offers, output_file="processus_ouverts.csv"):
             ])
     print(f"{len(open_offers)} offres exportées dans : {output_file}")
     return output_file
+
+
+def offer_key(offer):
+    url = (offer.get("offer_url") or offer.get("Offer URL") or "").strip()
+    if url:
+        return f"url:{url}"
+    company = (offer.get("company") or offer.get("Company") or "").strip().lower()
+    name = (offer.get("name") or offer.get("Name") or "").strip().lower()
+    return f"fallback:{company}:{name}"
+
+
+def detect_new_offers(open_offers, previous_rows):
+    existing_keys = {offer_key(row) for row in previous_rows}
+    return [offer for offer in open_offers if offer_key(offer) not in existing_keys]
+
+
+def read_email_recipients(csv_path="email.csv"):
+    env_recipients = os.getenv("TO_ADDRS") or os.getenv("MAIL_TO_ADDRS")
+    recipients = []
+    if env_recipients:
+        recipients.extend(
+            recipient.strip()
+            for recipient in env_recipients.replace(";", ",").split(",")
+            if recipient.strip()
+        )
+
+    if os.path.exists(csv_path):
+        recipients.extend(
+            row["email"].strip()
+            for row in read_process_csv(csv_path)
+            if row.get("email") and row["email"].strip()
+        )
+
+    return sorted(set(recipients))
+
+
+def format_offer_for_email(offer):
+    parts = [
+        offer.get("company") or "Unknown company",
+        offer.get("name") or "Untitled",
+    ]
+    if offer.get("region"):
+        parts.append(offer["region"])
+    if offer.get("stage"):
+        parts.append(offer["stage"])
+    if offer.get("offer_url"):
+        parts.append(offer["offer_url"])
+    return " - ".join(parts)
+
+
+def format_bool(value):
+    return "Oui" if value else "Non"
+
+
+def format_categories(categories):
+    if isinstance(categories, list):
+        return ", ".join(str(category) for category in categories if category)
+    return categories or ""
+
+
+def build_email_text(open_offers):
+    lines = [
+        "Bonjour,",
+        "",
+        f"{len(open_offers)} nouveau(x) summer internship(s) ouvert(s) ont été détecté(s).",
+        "",
+    ]
+    for index, offer in enumerate(open_offers, start=1):
+        lines.extend(
+            [
+                f"{index}. {offer.get('company') or 'Unknown company'} - {offer.get('name') or 'Untitled'}",
+                f"   Région: {offer.get('region') or 'Non précisée'}",
+                f"   Stage: {offer.get('stage') or 'Unknown'}",
+                f"   Catégories: {format_categories(offer.get('categories')) or 'Non précisées'}",
+                f"   Ouverture: {offer.get('opening_date') or 'Non précisée'}",
+                f"   Clôture: {offer.get('closing_date') or 'Non précisée'}",
+                f"   CV requis: {format_bool(offer.get('needs_cv'))}",
+                f"   Cover letter requise: {format_bool(offer.get('needs_cover_letter'))}",
+                f"   Lien: {offer.get('offer_url') or 'Non disponible'}",
+                "",
+            ]
+        )
+    lines.append("Le CSV complet est joint à ce mail.")
+    return "\n".join(lines)
+
+
+def build_email_html(open_offers):
+    rows = []
+    for offer in open_offers:
+        company = escape(offer.get("company") or "Unknown company")
+        name = escape(offer.get("name") or "Untitled")
+        url = offer.get("offer_url") or ""
+        link = (
+            f'<a href="{escape(url, quote=True)}" style="color:#0f766e;text-decoration:none;font-weight:600;">Postuler</a>'
+            if url
+            else "Non disponible"
+        )
+        requirements = []
+        if offer.get("needs_cv"):
+            requirements.append("CV")
+        if offer.get("needs_cover_letter"):
+            requirements.append("Cover letter")
+        if offer.get("rolling"):
+            requirements.append("Rolling")
+        requirement_text = ", ".join(requirements) or "Aucun signalé"
+
+        rows.append(
+            f"""
+            <tr>
+              <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;">
+                <div style="font-weight:700;color:#111827;">{company}</div>
+                <div style="color:#374151;margin-top:3px;">{name}</div>
+                <div style="color:#6b7280;font-size:13px;margin-top:6px;">{escape(format_categories(offer.get("categories")) or "Catégories non précisées")}</div>
+              </td>
+              <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;color:#374151;">{escape(offer.get("region") or "Non précisée")}</td>
+              <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;color:#374151;">{escape(offer.get("stage") or "Unknown")}</td>
+              <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;color:#374151;">
+                <div>Ouverture: {escape(offer.get("opening_date") or "Non précisée")}</div>
+                <div>Clôture: {escape(offer.get("closing_date") or "Non précisée")}</div>
+              </td>
+              <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;color:#374151;">{escape(requirement_text)}</td>
+              <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;">{link}</td>
+            </tr>
+            """
+        )
+
+    return f"""\
+<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background:#f9fafb;font-family:Arial,Helvetica,sans-serif;color:#111827;">
+    <div style="max-width:980px;margin:0 auto;padding:28px 18px;">
+      <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+        <div style="padding:22px 24px;background:#111827;color:#ffffff;">
+          <div style="font-size:20px;font-weight:700;">Nouveaux summer internships</div>
+          <div style="font-size:14px;color:#d1d5db;margin-top:6px;">{len(open_offers)} nouvelle(s) offre(s) détectée(s)</div>
+        </div>
+        <div style="padding:18px 24px;color:#374151;font-size:14px;">
+          Bonjour,<br>
+          Voici les nouvelles offres détectées par le scraper. Le CSV complet est joint à ce mail.
+        </div>
+        <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:14px;">
+          <thead>
+            <tr style="background:#f3f4f6;color:#374151;text-align:left;">
+              <th style="padding:10px 12px;border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;">Offre</th>
+              <th style="padding:10px 12px;border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;">Région</th>
+              <th style="padding:10px 12px;border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;">Stage</th>
+              <th style="padding:10px 12px;border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;">Dates</th>
+              <th style="padding:10px 12px;border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;">Requis</th>
+              <th style="padding:10px 12px;border-top:1px solid #e5e7eb;border-bottom:1px solid #e5e7eb;">Lien</th>
+            </tr>
+          </thead>
+          <tbody>
+            {''.join(rows)}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </body>
+</html>
+"""
+
+
+def send_email(open_offers, csv_path=None):
+    smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_user = os.getenv("SMTP_USER")
+    smtp_pass = os.getenv("SMTP_PASS_APP") or os.getenv("SMTP_PASS")
+    from_addr = os.getenv("FROM_ADDR") or smtp_user
+    to_addrs = read_email_recipients()
+
+    missing = [
+        name
+        for name, value in {
+            "SMTP_USER": smtp_user,
+            "SMTP_PASS_APP or SMTP_PASS": smtp_pass,
+            "FROM_ADDR or SMTP_USER": from_addr,
+            "TO_ADDRS, MAIL_TO_ADDRS, or email.csv": to_addrs,
+        }.items()
+        if not value
+    ]
+    if missing:
+        print(f"Email skipped: missing {', '.join(missing)}")
+        return False
+
+    msg = EmailMessage()
+    msg["Subject"] = f"{len(open_offers)} nouveau(x) summer internship(s) ouvert(s)"
+    msg["From"] = from_addr
+    msg["To"] = ", ".join(to_addrs)
+    msg.set_content(build_email_text(open_offers))
+    msg.add_alternative(build_email_html(open_offers), subtype="html")
+
+    if csv_path:
+        with open(csv_path, "rb") as f:
+            msg.add_attachment(
+                f.read(),
+                maintype="text",
+                subtype="csv",
+                filename=os.path.basename(csv_path),
+            )
+
+    with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as smtp:
+        smtp.ehlo()
+        smtp.starttls()
+        smtp.ehlo()
+        smtp.login(smtp_user, smtp_pass)
+        smtp.send_message(msg, from_addr=from_addr, to_addrs=to_addrs)
+
+    print(f"Email envoyé à : {to_addrs}")
+    return True
 
 
 def notion_payload(offer):
@@ -403,7 +634,14 @@ def log_run_summary(open_offers):
 
 if __name__ == "__main__":
     offres = deduplicate_offers(scrape_open_summer_internships())
+    previous_offers = read_process_csv("processus_ouverts.csv")
+    new_offers = detect_new_offers(offres, previous_offers)
     log_run_summary(offres)
-    ecriture_csv(offres)
+    csv_file = ecriture_csv(offres)
+    if new_offers:
+        print(f"{len(new_offers)} nouvelle(s) offre(s) détectée(s), envoi email")
+        send_email(new_offers, csv_file)
+    else:
+        print("Aucune nouvelle offre détectée, email non envoyé")
     sync_to_notion(offres)
   
