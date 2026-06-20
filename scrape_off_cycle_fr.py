@@ -3,6 +3,8 @@ import os
 from datetime import datetime
 import requests
 
+from test import detect_new_offers, read_process_csv, send_email
+
 
 TRACKR_API_URL = "https://api.the-trackr.com/programmes"
 TRACKR_PARAMS = {
@@ -165,5 +167,13 @@ def log_run_summary(open_offers):
 if __name__ == "__main__":
     output_file = os.getenv("OUTPUT_FILE", DEFAULT_OUTPUT_FILE)
     offers = deduplicate_offers(scrape_open_off_cycle_internships())
+    previous_offers = read_process_csv(output_file)
+    force_email_all = os.getenv("FORCE_EMAIL_ALL", "").strip().lower() in ("1", "true", "yes")
+    new_offers = offers if force_email_all else detect_new_offers(offers, previous_offers)
     log_run_summary(offers)
-    write_csv(offers, output_file)
+    csv_file = write_csv(offers, output_file)
+    if new_offers:
+        print(f"{len(new_offers)} nouvelle(s) offre(s) off-cycle FR détectée(s), envoi email")
+        send_email(new_offers, csv_file, "off-cycle internship(s) FR")
+    else:
+        print("Aucune nouvelle offre off-cycle FR détectée, email non envoyé")

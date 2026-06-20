@@ -229,11 +229,11 @@ def format_categories(categories):
     return categories or ""
 
 
-def build_email_text(open_offers):
+def build_email_text(open_offers, programme_label="summer internship(s)"):
     lines = [
         "Bonjour,",
         "",
-        f"{len(open_offers)} nouveau(x) summer internship(s) ouvert(s) ont été détecté(s).",
+        f"{len(open_offers)} nouveau(x) {programme_label} ouvert(s) ont été détecté(s).",
         "",
     ]
     for index, offer in enumerate(open_offers, start=1):
@@ -255,7 +255,7 @@ def build_email_text(open_offers):
     return "\n".join(lines)
 
 
-def build_email_html(open_offers):
+def build_email_html(open_offers, programme_label="summer internship(s)"):
     rows = []
     for offer in open_offers:
         company = escape(offer.get("company") or "Unknown company")
@@ -302,7 +302,7 @@ def build_email_html(open_offers):
     <div style="max-width:980px;margin:0 auto;padding:28px 18px;">
       <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
         <div style="padding:22px 24px;background:#111827;color:#ffffff;">
-          <div style="font-size:20px;font-weight:700;">Nouveaux summer internships</div>
+          <div style="font-size:20px;font-weight:700;">Nouveaux {escape(programme_label)}</div>
           <div style="font-size:14px;color:#d1d5db;margin-top:6px;">{len(open_offers)} nouvelle(s) offre(s) détectée(s)</div>
         </div>
         <div style="padding:18px 24px;color:#374151;font-size:14px;">
@@ -331,7 +331,7 @@ def build_email_html(open_offers):
 """
 
 
-def send_email(open_offers, csv_path=None):
+def send_email(open_offers, csv_path=None, programme_label="summer internship(s)"):
     smtp_server = clean_env("SMTP_SERVER", "smtp.gmail.com")
     smtp_port = int(clean_env("SMTP_PORT", "587"))
     smtp_user = clean_env("SMTP_USER")
@@ -354,11 +354,11 @@ def send_email(open_offers, csv_path=None):
         return False
 
     msg = EmailMessage()
-    msg["Subject"] = f"{len(open_offers)} nouveau(x) summer internship(s) ouvert(s)"
+    msg["Subject"] = f"{len(open_offers)} nouveau(x) {programme_label} ouvert(s)"
     msg["From"] = from_addr
     msg["To"] = ", ".join(to_addrs)
-    msg.set_content(build_email_text(open_offers))
-    msg.add_alternative(build_email_html(open_offers), subtype="html")
+    msg.set_content(build_email_text(open_offers, programme_label))
+    msg.add_alternative(build_email_html(open_offers, programme_label), subtype="html")
 
     if csv_path:
         with open(csv_path, "rb") as f:

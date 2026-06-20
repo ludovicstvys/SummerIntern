@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '*/10 * * * *'
   workflow_dispatch:
+    inputs:
+      notify_fr_all:
+        description: 'Envoyer toutes les offres FR off-cycle, même déjà présentes dans le CSV'
+        required: false
+        default: 'false'
 
 # 1. autoriser l’écriture du GITHUB_TOKEN
 permissions:
@@ -41,6 +46,12 @@ jobs:
         run: python test.py
 
       - name: Run FR off-cycle scraper
+        env:
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS_APP: ${{ secrets.SMTP_PASS_APP }}
+          FORCE_EMAIL_ALL: ${{ github.event.inputs.notify_fr_all }}
         run: python scrape_off_cycle_fr.py
 
       - name: Commit and push updated CSV
