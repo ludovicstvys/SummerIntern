@@ -229,6 +229,17 @@ def format_categories(categories):
     return categories or ""
 
 
+def category_group_label(offer):
+    return format_categories(offer.get("categories")) or "Catégorie non précisée"
+
+
+def offers_by_category(open_offers):
+    grouped = {}
+    for offer in open_offers:
+        grouped.setdefault(category_group_label(offer), []).append(offer)
+    return sorted(grouped.items(), key=lambda item: item[0].lower())
+
+
 def build_email_text(open_offers, programme_label="summer internship(s)"):
     lines = [
         "Bonjour,",
@@ -236,47 +247,53 @@ def build_email_text(open_offers, programme_label="summer internship(s)"):
         f"{len(open_offers)} nouveau(x) {programme_label} ouvert(s) ont été détecté(s).",
         "",
     ]
-    for index, offer in enumerate(open_offers, start=1):
-        lines.extend(
-            [
-                f"{index}. {offer.get('company') or 'Unknown company'} - {offer.get('name') or 'Untitled'}",
-                f"   Région: {offer.get('region') or 'Non précisée'}",
-                f"   Stage: {offer.get('stage') or 'Unknown'}",
-                f"   Catégories: {format_categories(offer.get('categories')) or 'Non précisées'}",
-                f"   Ouverture: {offer.get('opening_date') or 'Non précisée'}",
-                f"   Clôture: {offer.get('closing_date') or 'Non précisée'}",
-                f"   CV requis: {format_bool(offer.get('needs_cv'))}",
-                f"   Cover letter requise: {format_bool(offer.get('needs_cover_letter'))}",
-                f"   Lien: {offer.get('offer_url') or 'Non disponible'}",
-                "",
-            ]
-        )
+    offer_number = 1
+    for category, category_offers in offers_by_category(open_offers):
+        lines.extend([f"## {category}", ""])
+        for offer in category_offers:
+            lines.extend(
+                [
+                    f"{offer_number}. {offer.get('company') or 'Unknown company'} - {offer.get('name') or 'Untitled'}",
+                    f"   Région: {offer.get('region') or 'Non précisée'}",
+                    f"   Stage: {offer.get('stage') or 'Unknown'}",
+                    f"   Catégories: {format_categories(offer.get('categories')) or 'Non précisées'}",
+                    f"   Ouverture: {offer.get('opening_date') or 'Non précisée'}",
+                    f"   Clôture: {offer.get('closing_date') or 'Non précisée'}",
+                    f"   CV requis: {format_bool(offer.get('needs_cv'))}",
+                    f"   Cover letter requise: {format_bool(offer.get('needs_cover_letter'))}",
+                    f"   Lien: {offer.get('offer_url') or 'Non disponible'}",
+                    "",
+                ]
+            )
+            offer_number += 1
     lines.append("Le CSV complet est joint à ce mail.")
     return "\n".join(lines)
 
 
 def build_email_html(open_offers, programme_label="summer internship(s)"):
-    rows = []
-    for offer in open_offers:
-        company = escape(offer.get("company") or "Unknown company")
-        name = escape(offer.get("name") or "Untitled")
-        url = offer.get("offer_url") or ""
-        link = (
-            f'<a href="{escape(url, quote=True)}" style="color:#0f766e;text-decoration:none;font-weight:600;">Postuler</a>'
-            if url
-            else "Non disponible"
-        )
-        requirements = []
-        if offer.get("needs_cv"):
-            requirements.append("CV")
-        if offer.get("needs_cover_letter"):
-            requirements.append("Cover letter")
-        if offer.get("rolling"):
-            requirements.append("Rolling")
-        requirement_text = ", ".join(requirements) or "Aucun signalé"
+    sections = []
+    for category, category_offers in offers_by_category(open_offers):
+        rows = []
+        for offer in category_offers:
+            company = escape(offer.get("company") or "Unknown company")
+            name = escape(offer.get("name") or "Untitled")
+            url = offer.get("offer_url") or ""
+            link = (
+                f'<a href="{escape(url, quote=True)}" style="color:#0f766e;text-decoration:none;font-weight:600;">Postuler</a>'
+                if url
+                else "Non disponible"
+            )
+            requirements = []
+            if offer.get("needs_cv"):
+                requirements.append("CV")
+            if offer.get("needs_cover_letter"):
+                requirements.append("Cover letter")
+            if offer.get("rolling"):
+                requirements.append("Rolling")
+            requirement_text = ", ".join(requirements) or "Aucun signalé"
 
-        rows.append(
-            f"""
+            rows.append(
+                f"""
             <tr>
               <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;">
                 <div style="font-weight:700;color:#111827;">{company}</div>
@@ -292,6 +309,17 @@ def build_email_html(open_offers, programme_label="summer internship(s)"):
               <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;color:#374151;">{escape(requirement_text)}</td>
               <td style="padding:14px 12px;border-bottom:1px solid #e5e7eb;">{link}</td>
             </tr>
+            """
+            )
+
+        sections.append(
+            f"""
+            <tr>
+              <td colspan="6" style="padding:12px 12px;background:#e5e7eb;color:#111827;font-weight:700;border-top:1px solid #d1d5db;border-bottom:1px solid #d1d5db;">
+                {escape(category)} ({len(category_offers)})
+              </td>
+            </tr>
+            {''.join(rows)}
             """
         )
 
@@ -321,7 +349,7 @@ def build_email_html(open_offers, programme_label="summer internship(s)"):
             </tr>
           </thead>
           <tbody>
-            {''.join(rows)}
+            {''.join(sections)}
           </tbody>
         </table>
       </div>
