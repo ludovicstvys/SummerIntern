@@ -40,16 +40,19 @@ jobs:
           SMTP_PASS_APP: ${{ secrets.SMTP_PASS_APP }}
         run: python test.py
 
+      - name: Run FR off-cycle scraper
+        run: python scrape_off_cycle_fr.py
+
       - name: Commit and push updated CSV
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add processus_ouverts.csv
+          git add processus_ouverts.csv processus_ouverts_fr_off_cycle.csv
           if ! git diff --cached --quiet; then
-            git commit -m "Mise à jour du CSV des internships"
+            git commit -m "Mise à jour des CSV internships"
             git push
           else
-            echo "Aucun changement détecté dans processus_ouverts.csv, rien à push."
+            echo "Aucun changement détecté dans les CSV, rien à push."
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
