@@ -14,6 +14,7 @@ TRACKR_PARAMS = {
     "type": "off-cycle-internships",
 }
 DEFAULT_OUTPUT_FILE = "processus_ouverts_fr_off_cycle.csv"
+EMAIL_START_TERM = os.getenv("OFF_CYCLE_EMAIL_START_TERM", "2027 Q1 Start")
 
 CSV_COLUMNS = [
     "Name",
@@ -164,16 +165,31 @@ def log_run_summary(open_offers):
     print(f"Regions: {regions}")
 
 
+def offer_has_start_term(offer, start_term):
+    categories = offer.get("categories") or offer.get("Categories") or []
+    if isinstance(categories, str):
+        categories = [category.strip() for category in categories.split(",")]
+    return start_term in categories
+
+
+def filter_offers_by_start_term(open_offers, start_term=EMAIL_START_TERM):
+    return [offer for offer in open_offers if offer_has_start_term(offer, start_term)]
+
+
 if __name__ == "__main__":
     output_file = os.getenv("OUTPUT_FILE", DEFAULT_OUTPUT_FILE)
     offers = deduplicate_offers(scrape_open_off_cycle_internships())
     previous_offers = read_process_csv(output_file)
     force_email_all = os.getenv("FORCE_EMAIL_ALL", "").strip().lower() in ("1", "true", "yes")
     new_offers = offers if force_email_all else detect_new_offers(offers, previous_offers)
+    email_offers = filter_offers_by_start_term(new_offers)
     log_run_summary(offers)
     csv_file = write_csv(offers, output_file)
-    if new_offers:
-        print(f"{len(new_offers)} nouvelle(s) offre(s) off-cycle FR détectée(s), envoi email")
-        send_email(new_offers, csv_file, "off-cycle internship(s) FR")
+    if email_offers:
+        print(
+            f"{len(email_offers)} nouvelle(s) offre(s) off-cycle FR "
+            f"{EMAIL_START_TERM} détectée(s), envoi email"
+        )
+        send_email(email_offers, csv_file, "off-cycle internship(s) FR")
     else:
-        print("Aucune nouvelle offre off-cycle FR détectée, email non envoyé")
+        print(f"Aucune nouvelle offre off-cycle FR {EMAIL_START_TERM} détectée, email non envoyé")
