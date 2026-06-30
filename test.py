@@ -7,16 +7,71 @@ import requests
 from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from html import escape
+from html.parser import HTMLParser
+
+
+def load_env_file(path=".env"):
+    if not os.path.exists(path):
+        return
+
+    with open(path, encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, value = line.split("=", 1)
+            name = name.strip()
+            value = value.strip().strip('"').strip("'")
+            if name and name not in os.environ:
+                os.environ[name] = value
+
 
 def clean_env(name, default=None):
     value = os.getenv(name, default)
     return value.strip() if isinstance(value, str) else value
 
 
+load_env_file()
+
 NOTION_API_VERSION = "2025-09-03"
 NOTION_DATA_SOURCE_ID = clean_env("NOTION_DATA_SOURCE_ID")
 TODO_DATA_SOURCE_ID = clean_env("TODO_DATA_SOURCE_ID")
 NOTION_TOKEN = clean_env("NOTION_TOKEN")
+_RESOLVED_DATA_SOURCE_IDS = {}
+_OFFER_DESCRIPTION_CACHE = {}
+NOTION_TEXT_LIMIT = 1900
+OFFER_DESCRIPTION_TIMEOUT = 8
+PLAYWRIGHT_DESCRIPTION_TIMEOUT_MS = 15000
+DESCRIPTION_KEYWORDS = (
+    "intern",
+    "internship",
+    "analyst",
+    "programme",
+    "program",
+    "role",
+    "team",
+    "opportunity",
+    "responsibilities",
+    "requirements",
+    "candidate",
+    "graduate",
+    "off-cycle",
+    "summer",
+    "investment",
+    "markets",
+    "finance",
+)
+DESCRIPTION_NOISE_PATTERNS = (
+    "accept cookies",
+    "cookie policy",
+    "privacy policy",
+    "terms of use",
+    "sign in",
+    "log in",
+    "create alert",
+    "equal opportunity employer",
+    "powered by",
+)
 
 CSV_COLUMNS = [
     "Name",
@@ -66,6 +121,273 @@ def raise_for_notion(response, context):
                 "or it has not been shared with the integration attached to NOTION_TOKEN."
             )
         raise exc
+
+
+def notion_headers():
+    return {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Notion-Version": NOTION_API_VERSION,
+        "Content-Type": "application/json",
+    }
+
+
+def resolve_data_source_id(configured_id, label):
+    if not configured_id:
+        return None
+    if configured_id in _RESOLVED_DATA_SOURCE_IDS:
+        return _RESOLVED_DATA_SOURCE_IDS[configured_id]
+
+    headers = notion_headers()
+    data_source_response = requests.get(
+        f"https://api.notion.com/v1/data_sources/{configured_id}",
+        headers=headers,
+        timeout=30,
+    )
+    if data_source_response.ok:
+        _RESOLVED_DATA_SOURCE_IDS[configured_id] = configured_id
+        return configured_id
+
+    database_response = requests.get(
+        f"https://api.notion.com/v1/databases/{configured_id}",
+        headers=headers,
+        timeout=30,
+    )
+    if database_response.ok:
+        data_sources = database_response.json().get("data_sources") or []
+        if data_sources:
+            resolved_id = data_sources[0]["id"]
+            print(f"{label}: resolved database ID to data source ID {resolved_id}")
+            _RESOLVED_DATA_SOURCE_IDS[configured_id] = resolved_id
+            return resolved_id
+
+    raise_for_notion(data_source_response, f"{label} data source retrieve")
+    return configured_id
+
+
+def fetch_data_source_schema(data_source_id):
+    response = requests.get(
+        f"https://api.notion.com/v1/data_sources/{data_source_id}",
+        headers=notion_headers(),
+        timeout=30,
+    )
+    raise_for_notion(response, "Notion data source retrieve")
+    return response.json().get("properties") or {}
+
+
+def prop_type(schema, name):
+    return (schema.get(name) or {}).get("type")
+
+
+def normalize_text(value):
+    if value in (None, ""):
+        return ""
+    return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def truncate_text(value, limit=NOTION_TEXT_LIMIT):
+    text = normalize_text(value)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def rich_text(content):
+    text = truncate_text(content)
+    return {"rich_text": [{"text": {"content": text}}]} if text else {"rich_text": []}
+
+
+def title_text(content):
+    return {"title": [{"text": {"content": str(content or "Untitled")}}]}
+
+
+def date_property(value):
+    return {"date": {"start": value}} if value else None
+
+
+def status_property(schema, name, candidates):
+    prop = schema.get(name) or {}
+    options = ((prop.get("status") or {}).get("options") or [])
+    option_names = {option.get("name") for option in options}
+    for candidate in candidates:
+        if candidate in option_names:
+            return {"status": {"name": candidate}}
+    return None
+
+
+def plain_text_from_property(prop):
+    if not prop:
+        return None
+    if prop.get("type") == "url":
+        return prop.get("url")
+    if prop.get("type") in ("rich_text", "title"):
+        return "".join(part.get("plain_text", "") for part in prop.get(prop["type"], [])) or None
+    if prop.get("type") == "date":
+        date_value = prop.get("date") or {}
+        return date_value.get("start")
+    return None
+
+
+def derived_role(offer):
+    categories = offer.get("categories") or []
+    category_text = " ".join(categories) if isinstance(categories, list) else str(categories)
+    text = f"{offer.get('name') or ''} {category_text}".lower()
+    if "off-cycle" in text or "q1 start" in text or "q2 start" in text or "q3 start" in text or "q4 start" in text:
+        return "Off-cycle"
+    if "summer" in text:
+        return "Summer Analyst"
+    return None
+
+
+def set_if_schema(properties, schema, name, expected_type, value):
+    if prop_type(schema, name) == expected_type and value is not None:
+        properties[name] = value
+
+
+def score_description_text(text):
+    normalized = normalize_text(text)
+    lowered = normalized.lower()
+    if len(normalized) < 80:
+        return -10
+    if any(pattern in lowered for pattern in DESCRIPTION_NOISE_PATTERNS):
+        return -5
+    keyword_hits = sum(1 for keyword in DESCRIPTION_KEYWORDS if keyword in lowered)
+    length_score = min(len(normalized), 1200) / 250
+    return keyword_hits * 3 + length_score
+
+
+def best_visible_description(candidates):
+    cleaned = []
+    seen = set()
+    for candidate in candidates:
+        text = truncate_text(candidate)
+        key = text.lower()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(text)
+    if not cleaned:
+        return None
+    best = max(cleaned, key=score_description_text)
+    return best if score_description_text(best) > 0 else None
+
+
+class OfferDescriptionParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.meta = {}
+        self.title_parts = []
+        self.in_title = False
+
+    def handle_starttag(self, tag, attrs):
+        attrs = {name.lower(): value for name, value in attrs if name}
+        if tag.lower() == "title":
+            self.in_title = True
+            return
+        if tag.lower() != "meta":
+            return
+
+        key = (attrs.get("property") or attrs.get("name") or "").strip().lower()
+        content = attrs.get("content")
+        if key and content:
+            self.meta[key] = normalize_text(content)
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "title":
+            self.in_title = False
+
+    def handle_data(self, data):
+        if self.in_title:
+            self.title_parts.append(data)
+
+    def best_description(self):
+        for key in ("og:description", "description", "twitter:description"):
+            if self.meta.get(key):
+                return self.meta[key]
+        return None
+
+
+def fetch_offer_link_description(url):
+    url = (url or "").strip()
+    if not url:
+        return None
+    if url in _OFFER_DESCRIPTION_CACHE:
+        return _OFFER_DESCRIPTION_CACHE[url]
+
+    description = None
+    try:
+        response = requests.get(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+                ),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+            allow_redirects=True,
+            timeout=OFFER_DESCRIPTION_TIMEOUT,
+        )
+        content_type = response.headers.get("Content-Type", "")
+        if response.ok and "html" in content_type.lower():
+            parser = OfferDescriptionParser()
+            parser.feed(response.text[:250000])
+            description = parser.best_description()
+    except requests.RequestException:
+        description = None
+
+    description = truncate_text(description)
+    _OFFER_DESCRIPTION_CACHE[url] = description
+    return description
+
+
+def fetch_offer_rendered_description(url):
+    url = (url or "").strip()
+    if not url:
+        return None
+
+    browser = None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+                )
+            )
+            page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_DESCRIPTION_TIMEOUT_MS)
+            page.wait_for_timeout(2500)
+            candidates = page.locator(
+                "main, article, section, [role='main'], "
+                "[class*='job'], [class*='description'], [class*='posting'], "
+                "[data-automation-id*='description'], [data-testid*='description'], "
+                "p, li"
+            ).evaluate_all(
+                """nodes => nodes
+                    .map(node => node.innerText || node.textContent || '')
+                    .map(text => text.replace(/\\s+/g, ' ').trim())
+                    .filter(text => text.length >= 80)
+                """
+            )
+            return best_visible_description(candidates)
+    except Exception:
+        return None
+    finally:
+        if browser:
+            try:
+                browser.close()
+            except Exception:
+                pass
+
+
+def offer_notes_for_notion(offer):
+    return (
+        fetch_offer_link_description(offer.get("offer_url"))
+        or fetch_offer_rendered_description(offer.get("offer_url"))
+        or offer.get("notes")
+        or offer.get("company_description")
+        or ""
+    )
 
 def scrape_open_summer_internships():
     URL = "https://app.the-trackr.com/uk-finance/summer-internships"
@@ -408,32 +730,50 @@ def send_email(open_offers, csv_path=None, programme_label="summer internship(s)
     return True
 
 
-def notion_payload(offer):
+def notion_payload(offer, data_source_id=None, schema=None):
+    schema = schema or {}
+    properties = {}
+    categories = offer.get("categories") or []
+    if isinstance(categories, str):
+        categories = [category.strip() for category in categories.split(",") if category.strip()]
+    categories_text = format_categories(categories)
+    role = derived_role(offer)
+    notes = offer_notes_for_notion(offer)
+
+    set_if_schema(properties, schema, "Name", "title", title_text(offer.get("name")))
+    set_if_schema(properties, schema, "Entreprise", "title", title_text(offer.get("company")))
+    set_if_schema(properties, schema, "Company", "rich_text", rich_text(offer.get("company")))
+    set_if_schema(properties, schema, "Company ID", "rich_text", rich_text(offer.get("company_id")))
+    set_if_schema(properties, schema, "Job Title", "rich_text", rich_text(offer.get("name")))
+    set_if_schema(properties, schema, "Offer URL", "url", {"url": offer.get("offer_url") or None})
+    set_if_schema(properties, schema, "lien offre", "rich_text", rich_text(offer.get("offer_url")))
+    set_if_schema(properties, schema, "Region", "select", {"select": {"name": offer.get("region") or "Other"}})
+    set_if_schema(properties, schema, "Lieu", "rich_text", rich_text(offer.get("region")))
+    set_if_schema(properties, schema, "Categories", "multi_select", {"multi_select": [{"name": c} for c in categories]})
+    set_if_schema(properties, schema, "Start month", "rich_text", rich_text(categories_text))
+    if role:
+        set_if_schema(properties, schema, "Role", "multi_select", {"multi_select": [{"name": role}]})
+    set_if_schema(properties, schema, "Opening Date", "date", date_property(offer.get("opening_date")))
+    set_if_schema(properties, schema, "Date d'ouverture", "rich_text", rich_text(offer.get("opening_date")))
+    set_if_schema(properties, schema, "Closing Date", "date", date_property(offer.get("closing_date")))
+    set_if_schema(properties, schema, "Date de fermeture", "rich_text", rich_text(offer.get("closing_date")))
+    set_if_schema(properties, schema, "Stage", "select", {"select": {"name": offer.get("stage") or "Unknown"}})
+    set_if_schema(properties, schema, "Rolling", "checkbox", {"checkbox": bool(offer.get("rolling"))})
+    set_if_schema(properties, schema, "Needs CV", "checkbox", {"checkbox": bool(offer.get("needs_cv"))})
+    set_if_schema(properties, schema, "Needs Cover Letter", "checkbox", {"checkbox": bool(offer.get("needs_cover_letter"))})
+    set_if_schema(properties, schema, "Company Description", "rich_text", rich_text(offer.get("company_description")))
+    set_if_schema(properties, schema, "Notes", "rich_text", rich_text(notes))
+
     return {
-        "parent": {"data_source_id": NOTION_DATA_SOURCE_ID},
-        "properties": {
-            "Name": {"title": [{"text": {"content": offer["name"] or "Untitled"}}]},
-            "Company": {"rich_text": [{"text": {"content": offer["company"] or ""}}]},
-            "Company ID": {"rich_text": [{"text": {"content": offer["company_id"] or ""}}]},
-            "Offer URL": {"url": offer["offer_url"] or None},
-            "Region": {"select": {"name": offer["region"] or "Other"}},
-            "Categories": {"multi_select": [{"name": c} for c in (offer["categories"] or [])]},
-            "Opening Date": {"date": {"start": offer["opening_date"]} if offer["opening_date"] else None},
-            "Closing Date": {"date": {"start": offer["closing_date"]} if offer["closing_date"] else None},
-            "Stage": {"select": {"name": offer["stage"] or "Unknown"}},
-            "Rolling": {"checkbox": bool(offer["rolling"])},
-            "Needs CV": {"checkbox": bool(offer["needs_cv"])},
-            "Needs Cover Letter": {"checkbox": bool(offer["needs_cover_letter"])},
-            "Company Description": {"rich_text": [{"text": {"content": offer["company_description"] or ""}}]},
-            "Notes": {"rich_text": [{"text": {"content": offer["notes"] or ""}}]},
-        },
+        "parent": {"data_source_id": data_source_id or NOTION_DATA_SOURCE_ID},
+        "properties": properties,
     }
 
 
-def todo_payload(offer, opened_on, due_on):
+def todo_payload(offer, opened_on, due_on, data_source_id=None):
     task_name = f"TODO - {offer['company'] or 'Unknown company'} - {offer['name'] or 'Untitled'}"
     payload = {
-        "parent": {"data_source_id": TODO_DATA_SOURCE_ID},
+        "parent": {"data_source_id": data_source_id or TODO_DATA_SOURCE_ID},
         "properties": {
             "Task": {"title": [{"text": {"content": task_name}}]},
             "Company": {"rich_text": [{"text": {"content": offer["company"] or ""}}]},
@@ -451,12 +791,9 @@ def todo_payload(offer, opened_on, due_on):
     return payload
 
 
-def fetch_existing_offers():
-    headers = {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Notion-Version": NOTION_API_VERSION,
-        "Content-Type": "application/json",
-    }
+def fetch_existing_offers(data_source_id=None):
+    headers = notion_headers()
+    target_data_source_id = data_source_id or NOTION_DATA_SOURCE_ID
 
     existing_offers = {}
     start_cursor = None
@@ -467,7 +804,7 @@ def fetch_existing_offers():
             payload["start_cursor"] = start_cursor
 
         response = requests.post(
-            f"https://api.notion.com/v1/data_sources/{NOTION_DATA_SOURCE_ID}/query",
+            f"https://api.notion.com/v1/data_sources/{target_data_source_id}/query",
             headers=headers,
             json=payload,
             timeout=30,
@@ -477,13 +814,14 @@ def fetch_existing_offers():
 
         for page in data.get("results", []):
             properties = page.get("properties", {})
-            url_prop = properties.get("Offer URL", {}).get("url")
+            url_prop = plain_text_from_property(properties.get("Offer URL")) or plain_text_from_property(properties.get("lien offre"))
             opening_prop = properties.get("Opening Date", {}).get("date")
+            opening_value = (opening_prop or {}).get("start") or plain_text_from_property(properties.get("Date d'ouverture"))
             status_prop = properties.get("Status", {}).get("status")
             if url_prop:
                 existing_offers[url_prop.strip()] = {
                     "page_id": page.get("id"),
-                    "opening_date": (opening_prop or {}).get("start"),
+                    "opening_date": opening_value,
                     "status": (status_prop or {}).get("name"),
                 }
 
@@ -494,12 +832,9 @@ def fetch_existing_offers():
     return existing_offers
 
 
-def fetch_existing_todos():
-    headers = {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Notion-Version": NOTION_API_VERSION,
-        "Content-Type": "application/json",
-    }
+def fetch_existing_todos(data_source_id=None):
+    headers = notion_headers()
+    target_data_source_id = data_source_id or TODO_DATA_SOURCE_ID
 
     existing_todos = {}
     start_cursor = None
@@ -510,7 +845,7 @@ def fetch_existing_todos():
             payload["start_cursor"] = start_cursor
 
         response = requests.post(
-            f"https://api.notion.com/v1/data_sources/{TODO_DATA_SOURCE_ID}/query",
+            f"https://api.notion.com/v1/data_sources/{target_data_source_id}/query",
             headers=headers,
             json=payload,
             timeout=30,
@@ -557,19 +892,21 @@ def deduplicate_offers(open_offers):
 def sync_to_notion(open_offers):
     if not NOTION_TOKEN:
         raise RuntimeError("Missing NOTION_TOKEN environment variable")
+    if not NOTION_DATA_SOURCE_ID:
+        raise RuntimeError("Missing NOTION_DATA_SOURCE_ID environment variable")
 
-    headers = {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Notion-Version": NOTION_API_VERSION,
-        "Content-Type": "application/json",
-    }
+    headers = notion_headers()
+    notion_data_source_id = resolve_data_source_id(NOTION_DATA_SOURCE_ID, "Notion internships")
+    todo_data_source_id = resolve_data_source_id(TODO_DATA_SOURCE_ID, "Notion todos") if TODO_DATA_SOURCE_ID else None
+    notion_schema = fetch_data_source_schema(notion_data_source_id)
+    todo_schema = fetch_data_source_schema(todo_data_source_id) if todo_data_source_id else {}
 
-    existing_offers = fetch_existing_offers()
-    todos_enabled = bool(TODO_DATA_SOURCE_ID)
+    existing_offers = fetch_existing_offers(notion_data_source_id)
+    todos_enabled = bool(todo_data_source_id and "Offer URL" in todo_schema)
     existing_todos = {}
     if todos_enabled:
         try:
-            existing_todos = fetch_existing_todos()
+            existing_todos = fetch_existing_todos(todo_data_source_id)
         except requests.HTTPError:
             todos_enabled = False
             print(
@@ -577,7 +914,10 @@ def sync_to_notion(open_offers):
                 "Check that the ID is correct and shared with the Notion integration."
             )
     else:
-        print("Todo sync skipped: missing TODO_DATA_SOURCE_ID environment variable")
+        if todo_data_source_id:
+            print("Todo sync skipped: todo data source has no Offer URL property for deduplication")
+        else:
+            print("Todo sync skipped: missing TODO_DATA_SOURCE_ID environment variable")
     created = 0
     updated = 0
     opened = 0
@@ -585,9 +925,9 @@ def sync_to_notion(open_offers):
     todo_updated = 0
     skipped_no_url = 0
     for offer in open_offers:
-        payload = notion_payload(offer)
+        payload = notion_payload(offer, notion_data_source_id, notion_schema)
         for key in ["Opening Date", "Closing Date"]:
-            if payload["properties"][key] is None:
+            if key in payload["properties"] and payload["properties"][key] is None:
                 del payload["properties"][key]
         offer_url = (offer.get("offer_url") or "").strip()
         if not offer_url:
@@ -600,7 +940,9 @@ def sync_to_notion(open_offers):
             previous_opening_date = existing.get("opening_date")
             newly_opened = bool(incoming_opening_date and not previous_opening_date)
             if newly_opened:
-                payload["properties"]["Status"] = {"status": {"name": "Opened"}}
+                status = status_property(notion_schema, "Status", ["Ouvert", "Opened"])
+                if status:
+                    payload["properties"]["Status"] = status
                 opened += 1
             response = requests.patch(
                 f"https://api.notion.com/v1/pages/{page_id}",
@@ -614,7 +956,7 @@ def sync_to_notion(open_offers):
             if newly_opened and todos_enabled:
                 due_date = add_days(incoming_opening_date, 2)
                 todo_existing = existing_todos.get(offer_url)
-                todo_request = todo_payload(offer, incoming_opening_date, due_date)
+                todo_request = todo_payload(offer, incoming_opening_date, due_date, todo_data_source_id)
                 if todo_existing:
                     todo_page_id = todo_existing["page_id"]
                     response = requests.patch(
@@ -639,8 +981,13 @@ def sync_to_notion(open_offers):
                     }
                     todo_created += 1
         else:
-            if offer.get("opening_date"):
-                payload["properties"]["Status"] = {"status": {"name": "Closed"}}
+            status = (
+                status_property(notion_schema, "Status", ["Ouvert", "Opened"])
+                if offer.get("opening_date")
+                else status_property(notion_schema, "Status", ["Pas encore ouvert", "Closed"])
+            )
+            if status:
+                payload["properties"]["Status"] = status
             response = requests.post("https://api.notion.com/v1/pages", headers=headers, json=payload, timeout=30)
             raise_for_notion(response, "Notion page create")
             if offer_url:

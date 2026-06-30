@@ -3,12 +3,12 @@ import os
 from datetime import datetime
 import requests
 
-from test import detect_new_offers, read_process_csv, send_email
+from test import detect_new_offers, read_process_csv, send_email, sync_to_notion
 
 
 TRACKR_API_URL = "https://api.the-trackr.com/programmes"
 TRACKR_PARAMS = {
-    "region": "FR",
+    "region": "France",
     "industry": "Finance",
     "season": "2027",
     "type": "summer-internships",
@@ -177,3 +177,4 @@ if __name__ == "__main__":
         send_email(new_offers, csv_file, "summer internship(s) FR")
     else:
         print("Aucune nouvelle offre summer FR détectée, email non envoyé")
+    sync_to_notion(offers)

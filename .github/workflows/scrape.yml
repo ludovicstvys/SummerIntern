@@ -55,6 +55,9 @@ jobs:
 
       - name: Run FR off-cycle scraper
         env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
+          TODO_DATA_SOURCE_ID: ${{ secrets.TODO_DATA_SOURCE_ID }}
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -64,6 +67,9 @@ jobs:
 
       - name: Run FR summer scraper
         env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
+          TODO_DATA_SOURCE_ID: ${{ secrets.TODO_DATA_SOURCE_ID }}
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -73,6 +79,9 @@ jobs:
 
       - name: Run UK off-cycle scraper
         env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
+          TODO_DATA_SOURCE_ID: ${{ secrets.TODO_DATA_SOURCE_ID }}
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}

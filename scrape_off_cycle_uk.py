@@ -3,7 +3,7 @@ import os
 from datetime import datetime
 import requests
 
-from test import detect_new_offers, read_process_csv, send_email
+from test import detect_new_offers, read_process_csv, send_email, sync_to_notion
 
 
 TRACKR_API_URL = "https://api.the-trackr.com/programmes"
@@ -193,3 +193,6 @@ if __name__ == "__main__":
         send_email(email_offers, csv_file, "off-cycle internship(s) UK")
     else:
         print(f"Aucune nouvelle offre off-cycle UK {EMAIL_START_TERM} détectée, email non envoyé")
+    notion_offers = filter_offers_by_start_term(offers)
+    print(f"{len(notion_offers)} offre(s) off-cycle UK {EMAIL_START_TERM} synchronisée(s) vers Notion")
+    sync_to_notion(notion_offers)
