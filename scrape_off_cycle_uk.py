@@ -185,6 +185,11 @@ if __name__ == "__main__":
     email_offers = filter_offers_by_start_term(new_offers)
     log_run_summary(offers)
     csv_file = write_csv(offers, output_file)
+    notion_offers = filter_offers_by_start_term(offers)
+    print(f"{len(notion_offers)} offre(s) off-cycle UK {EMAIL_START_TERM} synchronisée(s) vers Notion")
+    notion_result = sync_to_notion(notion_offers)
+    email_urls = notion_result["created_offer_urls"] | notion_result["opened_offer_urls"]
+    email_offers = [offer for offer in email_offers if (offer.get("offer_url") or "").strip() in email_urls]
     if email_offers:
         print(
             f"{len(email_offers)} nouvelle(s) offre(s) off-cycle UK "
@@ -193,6 +198,3 @@ if __name__ == "__main__":
         send_email(email_offers, csv_file, "off-cycle internship(s) UK")
     else:
         print(f"Aucune nouvelle offre off-cycle UK {EMAIL_START_TERM} détectée, email non envoyé")
-    notion_offers = filter_offers_by_start_term(offers)
-    print(f"{len(notion_offers)} offre(s) off-cycle UK {EMAIL_START_TERM} synchronisée(s) vers Notion")
-    sync_to_notion(notion_offers)

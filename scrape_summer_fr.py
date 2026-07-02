@@ -172,9 +172,11 @@ if __name__ == "__main__":
     new_offers = offers if force_email_all else detect_new_offers(offers, previous_offers)
     log_run_summary(offers)
     csv_file = write_csv(offers, output_file)
-    if new_offers:
-        print(f"{len(new_offers)} nouvelle(s) offre(s) summer FR détectée(s), envoi email")
-        send_email(new_offers, csv_file, "summer internship(s) FR")
+    notion_result = sync_to_notion(offers)
+    email_urls = notion_result["created_offer_urls"] | notion_result["opened_offer_urls"]
+    email_offers = [offer for offer in new_offers if (offer.get("offer_url") or "").strip() in email_urls]
+    if email_offers:
+        print(f"{len(email_offers)} nouvelle(s) offre(s) summer FR détectée(s), envoi email")
+        send_email(email_offers, csv_file, "summer internship(s) FR")
     else:
         print("Aucune nouvelle offre summer FR détectée, email non envoyé")
-    sync_to_notion(offers)

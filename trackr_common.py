@@ -1,20 +1,10 @@
 import csv
-import os
 from datetime import datetime
-import requests
 
-from test import detect_new_offers, read_process_csv, send_email, sync_to_notion
+import requests
 
 
 TRACKR_API_URL = "https://api.the-trackr.com/programmes"
-TRACKR_PARAMS = {
-    "region": "France",
-    "industry": "Finance",
-    "season": "2027",
-    "type": "off-cycle-internships",
-}
-DEFAULT_OUTPUT_FILE = "processus_ouverts_fr_off_cycle.csv"
-EMAIL_START_TERM = os.getenv("OFF_CYCLE_EMAIL_START_TERM", "2027 Q1 Start")
 
 CSV_COLUMNS = [
     "Name",
@@ -54,8 +44,8 @@ def extract_trackr_items(data):
     return []
 
 
-def scrape_open_off_cycle_internships():
-    response = requests.get(TRACKR_API_URL, params=TRACKR_PARAMS, timeout=30)
+def scrape_open_programmes(params):
+    response = requests.get(TRACKR_API_URL, params=params, timeout=30)
     response.raise_for_status()
     internships = extract_trackr_items(response.json())
 
@@ -122,7 +112,7 @@ def deduplicate_offers(open_offers):
     return deduped
 
 
-def write_csv(open_offers, output_file=DEFAULT_OUTPUT_FILE):
+def write_csv(open_offers, output_file):
     with open(output_file, mode="w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(CSV_COLUMNS)
@@ -172,29 +162,10 @@ def offer_has_start_term(offer, start_term):
     return start_term in categories
 
 
-def filter_offers_by_start_term(open_offers, start_term=EMAIL_START_TERM):
+def filter_offers_by_start_term(open_offers, start_term):
     return [offer for offer in open_offers if offer_has_start_term(offer, start_term)]
 
 
-if __name__ == "__main__":
-    output_file = os.getenv("OUTPUT_FILE", DEFAULT_OUTPUT_FILE)
-    offers = deduplicate_offers(scrape_open_off_cycle_internships())
-    previous_offers = read_process_csv(output_file)
-    force_email_all = os.getenv("FORCE_EMAIL_ALL", "").strip().lower() in ("1", "true", "yes")
-    new_offers = offers if force_email_all else detect_new_offers(offers, previous_offers)
-    email_offers = filter_offers_by_start_term(new_offers)
-    log_run_summary(offers)
-    csv_file = write_csv(offers, output_file)
-    notion_offers = filter_offers_by_start_term(offers)
-    print(f"{len(notion_offers)} offre(s) off-cycle FR {EMAIL_START_TERM} synchronisée(s) vers Notion")
-    notion_result = sync_to_notion(notion_offers)
+def filter_email_offers(new_offers, notion_result):
     email_urls = notion_result["created_offer_urls"] | notion_result["opened_offer_urls"]
-    email_offers = [offer for offer in email_offers if (offer.get("offer_url") or "").strip() in email_urls]
-    if email_offers:
-        print(
-            f"{len(email_offers)} nouvelle(s) offre(s) off-cycle FR "
-            f"{EMAIL_START_TERM} détectée(s), envoi email"
-        )
-        send_email(email_offers, csv_file, "off-cycle internship(s) FR")
-    else:
-        print(f"Aucune nouvelle offre off-cycle FR {EMAIL_START_TERM} détectée, email non envoyé")
+    return [offer for offer in new_offers if (offer.get("offer_url") or "").strip() in email_urls]

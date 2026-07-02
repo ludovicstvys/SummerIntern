@@ -897,9 +897,18 @@ def sync_to_notion(open_offers):
 
     headers = notion_headers()
     notion_data_source_id = resolve_data_source_id(NOTION_DATA_SOURCE_ID, "Notion internships")
-    todo_data_source_id = resolve_data_source_id(TODO_DATA_SOURCE_ID, "Notion todos") if TODO_DATA_SOURCE_ID else None
     notion_schema = fetch_data_source_schema(notion_data_source_id)
-    todo_schema = fetch_data_source_schema(todo_data_source_id) if todo_data_source_id else {}
+    todo_data_source_id = None
+    todo_schema = {}
+    if TODO_DATA_SOURCE_ID:
+        try:
+            todo_data_source_id = resolve_data_source_id(TODO_DATA_SOURCE_ID, "Notion todos")
+            todo_schema = fetch_data_source_schema(todo_data_source_id)
+        except requests.HTTPError:
+            print(
+                "Todo sync skipped: TODO_DATA_SOURCE_ID is not accessible. "
+                "Check that the ID is correct and shared with the Notion integration."
+            )
 
     existing_offers = fetch_existing_offers(notion_data_source_id)
     todos_enabled = bool(todo_data_source_id and "Offer URL" in todo_schema)
@@ -924,6 +933,8 @@ def sync_to_notion(open_offers):
     todo_created = 0
     todo_updated = 0
     skipped_no_url = 0
+    created_offer_urls = set()
+    opened_offer_urls = set()
     for offer in open_offers:
         payload = notion_payload(offer, notion_data_source_id, notion_schema)
         for key in ["Opening Date", "Closing Date"]:
@@ -944,6 +955,7 @@ def sync_to_notion(open_offers):
                 if status:
                     payload["properties"]["Status"] = status
                 opened += 1
+                opened_offer_urls.add(offer_url)
             response = requests.patch(
                 f"https://api.notion.com/v1/pages/{page_id}",
                 headers=headers,
@@ -997,6 +1009,7 @@ def sync_to_notion(open_offers):
                     "status": "Closed",
                 }
             created += 1
+            created_offer_urls.add(offer_url)
 
     print(
         "Notion sync: "
@@ -1004,6 +1017,10 @@ def sync_to_notion(open_offers):
         f"{todo_created} todos créés, {todo_updated} todos mis à jour, "
         f"{skipped_no_url} sans URL ignorées"
     )
+    return {
+        "created_offer_urls": created_offer_urls,
+        "opened_offer_urls": opened_offer_urls,
+    }
 
 
 def log_run_summary(open_offers):
@@ -1027,10 +1044,12 @@ if __name__ == "__main__":
     new_offers = detect_new_offers(offres, previous_offers)
     log_run_summary(offres)
     csv_file = ecriture_csv(offres)
-    if new_offers:
-        print(f"{len(new_offers)} nouvelle(s) offre(s) détectée(s), envoi email")
-        send_email(new_offers, csv_file)
+    notion_result = sync_to_notion(offres)
+    email_urls = notion_result["created_offer_urls"] | notion_result["opened_offer_urls"]
+    email_offers = [offer for offer in new_offers if (offer.get("offer_url") or "").strip() in email_urls]
+    if email_offers:
+        print(f"{len(email_offers)} nouvelle(s) offre(s) détectée(s), envoi email")
+        send_email(email_offers, csv_file)
     else:
         print("Aucune nouvelle offre détectée, email non envoyé")
-    sync_to_notion(offres)
   
