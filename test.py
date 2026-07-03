@@ -131,13 +131,49 @@ def notion_headers():
     }
 
 
+def short_id(value):
+    value = (value or "").strip()
+    if len(value) <= 12:
+        return value or "<missing>"
+    return f"{value[:8]}...{value[-4:]}"
+
+
+def audit_log(message):
+    print(f"[Notion audit] {message}")
+
+
+def schema_summary(schema):
+    return ", ".join(
+        f"{name}:{definition.get('type')}"
+        for name, definition in sorted(schema.items(), key=lambda item: item[0].lower())
+    )
+
+
+def offer_audit_label(offer):
+    company = normalize_text(offer.get("company") or offer.get("Company") or "Unknown company")
+    name = normalize_text(offer.get("name") or offer.get("Name") or "Untitled")
+    url = (offer.get("offer_url") or offer.get("Offer URL") or "").strip()
+    return f"{company} | {name} | url={url or '<missing>'}"
+
+
+def page_audit_summary(page_data):
+    if not isinstance(page_data, dict):
+        return "page=<invalid response>"
+    page_id = short_id(page_data.get("id"))
+    url = page_data.get("url") or page_data.get("public_url") or "<no Notion URL>"
+    return f"page_id={page_id}, notion_url={url}"
+
+
 def resolve_data_source_id(configured_id, label):
     if not configured_id:
         return None
     if configured_id in _RESOLVED_DATA_SOURCE_IDS:
-        return _RESOLVED_DATA_SOURCE_IDS[configured_id]
+        resolved_id = _RESOLVED_DATA_SOURCE_IDS[configured_id]
+        audit_log(f"{label}: reused resolved data source id {short_id(resolved_id)}")
+        return resolved_id
 
     headers = notion_headers()
+    audit_log(f"{label}: resolving configured id {short_id(configured_id)}")
     data_source_response = requests.get(
         f"https://api.notion.com/v1/data_sources/{configured_id}",
         headers=headers,
@@ -145,6 +181,7 @@ def resolve_data_source_id(configured_id, label):
     )
     if data_source_response.ok:
         _RESOLVED_DATA_SOURCE_IDS[configured_id] = configured_id
+        audit_log(f"{label}: configured id is directly accessible as data source {short_id(configured_id)}")
         return configured_id
 
     database_response = requests.get(
@@ -157,6 +194,9 @@ def resolve_data_source_id(configured_id, label):
         if data_sources:
             resolved_id = data_sources[0]["id"]
             print(f"{label}: resolved database ID to data source ID {resolved_id}")
+            audit_log(
+                f"{label}: database {short_id(configured_id)} resolved to data source {short_id(resolved_id)}"
+            )
             _RESOLVED_DATA_SOURCE_IDS[configured_id] = resolved_id
             return resolved_id
 
@@ -171,7 +211,9 @@ def fetch_data_source_schema(data_source_id):
         timeout=30,
     )
     raise_for_notion(response, "Notion data source retrieve")
-    return response.json().get("properties") or {}
+    schema = response.json().get("properties") or {}
+    audit_log(f"schema for data source {short_id(data_source_id)}: {schema_summary(schema)}")
+    return schema
 
 
 def prop_type(schema, name):
@@ -797,11 +839,16 @@ def fetch_existing_offers(data_source_id=None):
 
     existing_offers = {}
     start_cursor = None
+    pages_seen = 0
+    duplicate_urls = 0
+    pages_without_url = 0
+    page_number = 0
 
     while True:
         payload = {"page_size": 100}
         if start_cursor:
             payload["start_cursor"] = start_cursor
+        page_number += 1
 
         response = requests.post(
             f"https://api.notion.com/v1/data_sources/{target_data_source_id}/query",
@@ -811,24 +858,45 @@ def fetch_existing_offers(data_source_id=None):
         )
         raise_for_notion(response, "Notion data source query")
         data = response.json()
+        results = data.get("results", [])
+        pages_seen += len(results)
+        audit_log(
+            f"existing offers query page {page_number}: {len(results)} result(s), "
+            f"has_more={bool(data.get('has_more'))}"
+        )
 
-        for page in data.get("results", []):
+        for page in results:
             properties = page.get("properties", {})
             url_prop = plain_text_from_property(properties.get("Offer URL")) or plain_text_from_property(properties.get("lien offre"))
             opening_prop = properties.get("Opening Date", {}).get("date")
             opening_value = (opening_prop or {}).get("start") or plain_text_from_property(properties.get("Date d'ouverture"))
             status_prop = properties.get("Status", {}).get("status")
             if url_prop:
+                normalized_url = url_prop.strip()
+                if normalized_url in existing_offers:
+                    duplicate_urls += 1
+                    audit_log(
+                        "duplicate existing Offer URL in Notion: "
+                        f"url={normalized_url}, previous_page={short_id(existing_offers[normalized_url]['page_id'])}, "
+                        f"duplicate_page={short_id(page.get('id'))}"
+                    )
                 existing_offers[url_prop.strip()] = {
                     "page_id": page.get("id"),
                     "opening_date": opening_value,
                     "status": (status_prop or {}).get("name"),
                 }
+            else:
+                pages_without_url += 1
 
         if not data.get("has_more"):
             break
         start_cursor = data.get("next_cursor")
 
+    audit_log(
+        f"existing offers loaded: {len(existing_offers)} unique URL(s), "
+        f"{pages_seen} page(s) scanned, {duplicate_urls} duplicate URL(s), "
+        f"{pages_without_url} page(s) without Offer URL/lien offre"
+    )
     return existing_offers
 
 
@@ -838,11 +906,15 @@ def fetch_existing_todos(data_source_id=None):
 
     existing_todos = {}
     start_cursor = None
+    pages_seen = 0
+    pages_without_url = 0
+    page_number = 0
 
     while True:
         payload = {"page_size": 100}
         if start_cursor:
             payload["start_cursor"] = start_cursor
+        page_number += 1
 
         response = requests.post(
             f"https://api.notion.com/v1/data_sources/{target_data_source_id}/query",
@@ -852,8 +924,14 @@ def fetch_existing_todos(data_source_id=None):
         )
         raise_for_notion(response, "Notion todo data source query")
         data = response.json()
+        results = data.get("results", [])
+        pages_seen += len(results)
+        audit_log(
+            f"existing todos query page {page_number}: {len(results)} result(s), "
+            f"has_more={bool(data.get('has_more'))}"
+        )
 
-        for page in data.get("results", []):
+        for page in results:
             properties = page.get("properties", {})
             url_prop = properties.get("Offer URL", {}).get("url")
             due_prop = properties.get("Due", {}).get("date")
@@ -862,11 +940,17 @@ def fetch_existing_todos(data_source_id=None):
                     "page_id": page.get("id"),
                     "due": (due_prop or {}).get("start"),
                 }
+            else:
+                pages_without_url += 1
 
         if not data.get("has_more"):
             break
         start_cursor = data.get("next_cursor")
 
+    audit_log(
+        f"existing todos loaded: {len(existing_todos)} unique URL(s), "
+        f"{pages_seen} page(s) scanned, {pages_without_url} page(s) without Offer URL"
+    )
     return existing_todos
 
 
@@ -896,6 +980,11 @@ def sync_to_notion(open_offers):
         raise RuntimeError("Missing NOTION_DATA_SOURCE_ID environment variable")
 
     headers = notion_headers()
+    audit_log(
+        f"sync start: {len(open_offers)} offer(s), "
+        f"NOTION_DATA_SOURCE_ID={short_id(NOTION_DATA_SOURCE_ID)}, "
+        f"TODO_DATA_SOURCE_ID={short_id(TODO_DATA_SOURCE_ID) if TODO_DATA_SOURCE_ID else '<missing>'}"
+    )
     notion_data_source_id = resolve_data_source_id(NOTION_DATA_SOURCE_ID, "Notion internships")
     notion_schema = fetch_data_source_schema(notion_data_source_id)
     todo_data_source_id = None
@@ -912,6 +1001,7 @@ def sync_to_notion(open_offers):
 
     existing_offers = fetch_existing_offers(notion_data_source_id)
     todos_enabled = bool(todo_data_source_id and "Offer URL" in todo_schema)
+    audit_log(f"todo sync enabled={todos_enabled}")
     existing_todos = {}
     if todos_enabled:
         try:
@@ -941,8 +1031,13 @@ def sync_to_notion(open_offers):
             if key in payload["properties"] and payload["properties"][key] is None:
                 del payload["properties"][key]
         offer_url = (offer.get("offer_url") or "").strip()
+        audit_log(
+            f"offer candidate: {offer_audit_label(offer)} | "
+            f"payload_properties={sorted(payload['properties'].keys())}"
+        )
         if not offer_url:
             skipped_no_url += 1
+            audit_log(f"offer skipped: missing Offer URL | {offer_audit_label(offer)}")
             continue
         existing = existing_offers.get(offer_url)
         if existing:
@@ -950,6 +1045,13 @@ def sync_to_notion(open_offers):
             incoming_opening_date = offer.get("opening_date")
             previous_opening_date = existing.get("opening_date")
             newly_opened = bool(incoming_opening_date and not previous_opening_date)
+            audit_log(
+                f"offer action=update | page_id={short_id(page_id)} | "
+                f"existing_status={existing.get('status') or '<empty>'} | "
+                f"previous_opening={previous_opening_date or '<empty>'} | "
+                f"incoming_opening={incoming_opening_date or '<empty>'} | "
+                f"newly_opened={newly_opened} | {offer_audit_label(offer)}"
+            )
             if newly_opened:
                 status = status_property(notion_schema, "Status", ["Ouvert", "Opened"])
                 if status:
@@ -963,6 +1065,8 @@ def sync_to_notion(open_offers):
                 timeout=30,
             )
             raise_for_notion(response, f"Notion page update {page_id}")
+            updated_page = response.json()
+            audit_log(f"offer update ok | {page_audit_summary(updated_page)} | {offer_audit_label(offer)}")
             updated += 1
             existing_offers[offer_url]["opening_date"] = incoming_opening_date or previous_opening_date
             if newly_opened and todos_enabled:
@@ -971,6 +1075,10 @@ def sync_to_notion(open_offers):
                 todo_request = todo_payload(offer, incoming_opening_date, due_date, todo_data_source_id)
                 if todo_existing:
                     todo_page_id = todo_existing["page_id"]
+                    audit_log(
+                        f"todo action=update | page_id={short_id(todo_page_id)} | "
+                        f"due={due_date or '<empty>'} | {offer_audit_label(offer)}"
+                    )
                     response = requests.patch(
                         f"https://api.notion.com/v1/pages/{todo_page_id}",
                         headers=headers,
@@ -978,8 +1086,14 @@ def sync_to_notion(open_offers):
                         timeout=30,
                     )
                     raise_for_notion(response, f"Notion todo update {todo_page_id}")
+                    audit_log(f"todo update ok | {page_audit_summary(response.json())} | {offer_audit_label(offer)}")
                     todo_updated += 1
                 else:
+                    audit_log(
+                        f"todo action=create | due={due_date or '<empty>'} | "
+                        f"payload_properties={sorted(todo_request['properties'].keys())} | "
+                        f"{offer_audit_label(offer)}"
+                    )
                     response = requests.post(
                         "https://api.notion.com/v1/pages",
                         headers=headers,
@@ -987,10 +1101,12 @@ def sync_to_notion(open_offers):
                         timeout=30,
                     )
                     raise_for_notion(response, "Notion todo create")
+                    todo_page = response.json()
                     existing_todos[offer_url] = {
-                        "page_id": response.json().get("id"),
+                        "page_id": todo_page.get("id"),
                         "due": due_date,
                     }
+                    audit_log(f"todo create ok | {page_audit_summary(todo_page)} | {offer_audit_label(offer)}")
                     todo_created += 1
         else:
             status = (
@@ -1000,16 +1116,27 @@ def sync_to_notion(open_offers):
             )
             if status:
                 payload["properties"]["Status"] = status
+            else:
+                audit_log(
+                    "offer create warning: no matching Status option found for "
+                    f"opening_date={offer.get('opening_date') or '<empty>'} | {offer_audit_label(offer)}"
+                )
+            audit_log(
+                f"offer action=create | opening={offer.get('opening_date') or '<empty>'} | "
+                f"status_property={'Status' in payload['properties']} | {offer_audit_label(offer)}"
+            )
             response = requests.post("https://api.notion.com/v1/pages", headers=headers, json=payload, timeout=30)
             raise_for_notion(response, "Notion page create")
+            created_page = response.json()
             if offer_url:
                 existing_offers[offer_url] = {
-                    "page_id": response.json().get("id"),
+                    "page_id": created_page.get("id"),
                     "opening_date": offer.get("opening_date"),
-                    "status": "Closed",
+                    "status": ((status or {}).get("status") or {}).get("name"),
                 }
             created += 1
             created_offer_urls.add(offer_url)
+            audit_log(f"offer create ok | {page_audit_summary(created_page)} | {offer_audit_label(offer)}")
 
     print(
         "Notion sync: "
