@@ -256,6 +256,16 @@ def status_property(schema, name, candidates):
     return None
 
 
+def select_property(schema, name, candidates):
+    prop = schema.get(name) or {}
+    options = ((prop.get("select") or {}).get("options") or [])
+    option_names = {option.get("name") for option in options}
+    for candidate in candidates:
+        if candidate in option_names:
+            return {"select": {"name": candidate}}
+    return None
+
+
 def plain_text_from_property(prop):
     if not prop:
         return None
@@ -283,6 +293,13 @@ def derived_role(offer):
 def set_if_schema(properties, schema, name, expected_type, value):
     if prop_type(schema, name) == expected_type and value is not None:
         properties[name] = value
+
+
+def first_schema_property(schema, expected_type, candidates):
+    for candidate in candidates:
+        if prop_type(schema, candidate) == expected_type:
+            return candidate
+    return None
 
 
 def score_description_text(text):
@@ -812,24 +829,39 @@ def notion_payload(offer, data_source_id=None, schema=None):
     }
 
 
-def todo_payload(offer, opened_on, due_on, data_source_id=None):
+def todo_payload(offer, opened_on, due_on, data_source_id=None, schema=None):
+    schema = schema or {}
+    title_property = first_schema_property(schema, "title", ["Task", "Name"])
+    if not title_property:
+        raise RuntimeError("Todo sync requires a title property named Task or Name")
+
     task_name = f"TODO - {offer['company'] or 'Unknown company'} - {offer['name'] or 'Untitled'}"
+    properties = {
+        title_property: {"title": [{"text": {"content": task_name}}]},
+    }
+    set_if_schema(properties, schema, "Company", "rich_text", rich_text(offer["company"]))
+    set_if_schema(properties, schema, "Offer URL", "url", {"url": offer["offer_url"] or None})
+    set_if_schema(properties, schema, "Trigger Stage", "rich_text", rich_text(offer["stage"] or "Unknown"))
+    set_if_schema(properties, schema, "Opened On", "date", date_property(opened_on))
+
+    due_property = first_schema_property(schema, "date", ["Due", "Due Date"])
+    if due_property and due_on:
+        properties[due_property] = {"date": {"start": due_on}}
+
+    status = None
+    if prop_type(schema, "Status") == "status":
+        status = status_property(schema, "Status", ["To-do", "To do", "Not started", "À faire"])
+    elif prop_type(schema, "Status") == "select":
+        status = select_property(schema, "Status", ["To-do", "To do", "Not started", "À faire"])
+    if status:
+        properties["Status"] = status
+
+    set_if_schema(properties, schema, "Notes", "rich_text", rich_text(offer["notes"]))
+
     payload = {
         "parent": {"data_source_id": data_source_id or TODO_DATA_SOURCE_ID},
-        "properties": {
-            "Task": {"title": [{"text": {"content": task_name}}]},
-            "Company": {"rich_text": [{"text": {"content": offer["company"] or ""}}]},
-            "Offer URL": {"url": offer["offer_url"] or None},
-            "Trigger Stage": {"rich_text": [{"text": {"content": offer["stage"] or "Unknown"}}]},
-            "Opened On": {"date": {"start": opened_on} if opened_on else None},
-            "Due": {"date": {"start": due_on} if due_on else None},
-            "Status": {"select": {"name": "To-do"}},
-            "Notes": {"rich_text": [{"text": {"content": offer["notes"] or ""}}]},
-        },
+        "properties": properties,
     }
-    for key in ["Company", "Offer URL", "Trigger Stage", "Opened On", "Due", "Notes"]:
-        if payload["properties"][key] is None:
-            del payload["properties"][key]
     return payload
 
 
@@ -933,8 +965,8 @@ def fetch_existing_todos(data_source_id=None):
 
         for page in results:
             properties = page.get("properties", {})
-            url_prop = properties.get("Offer URL", {}).get("url")
-            due_prop = properties.get("Due", {}).get("date")
+            url_prop = plain_text_from_property(properties.get("Offer URL"))
+            due_prop = (properties.get("Due") or properties.get("Due Date") or {}).get("date")
             if url_prop:
                 existing_todos[url_prop.strip()] = {
                     "page_id": page.get("id"),
@@ -952,6 +984,65 @@ def fetch_existing_todos(data_source_id=None):
         f"{pages_seen} page(s) scanned, {pages_without_url} page(s) without Offer URL"
     )
     return existing_todos
+
+
+def todo_schema_ready(schema):
+    missing = []
+    if not first_schema_property(schema, "title", ["Task", "Name"]):
+        missing.append("Task or Name title")
+    if prop_type(schema, "Offer URL") != "url":
+        missing.append("Offer URL url")
+    if missing:
+        audit_log(f"todo schema not ready: missing {', '.join(missing)}")
+        return False
+    return True
+
+
+def upsert_todo_for_offer(headers, offer, opened_on, todo_data_source_id, todo_schema, existing_todos):
+    offer_url = (offer.get("offer_url") or "").strip()
+    if not offer_url:
+        audit_log(f"todo skipped: missing Offer URL | {offer_audit_label(offer)}")
+        return 0, 0
+
+    due_date = add_days(opened_on, 2)
+    todo_existing = existing_todos.get(offer_url)
+    todo_request = todo_payload(offer, opened_on, due_date, todo_data_source_id, todo_schema)
+
+    if todo_existing:
+        todo_page_id = todo_existing["page_id"]
+        audit_log(
+            f"todo action=update | page_id={short_id(todo_page_id)} | "
+            f"due={due_date or '<empty>'} | payload_properties={sorted(todo_request['properties'].keys())} | "
+            f"{offer_audit_label(offer)}"
+        )
+        response = requests.patch(
+            f"https://api.notion.com/v1/pages/{todo_page_id}",
+            headers=headers,
+            json={"properties": todo_request["properties"]},
+            timeout=30,
+        )
+        raise_for_notion(response, f"Notion todo update {todo_page_id}")
+        audit_log(f"todo update ok | {page_audit_summary(response.json())} | {offer_audit_label(offer)}")
+        return 0, 1
+
+    audit_log(
+        f"todo action=create | due={due_date or '<empty>'} | "
+        f"payload_properties={sorted(todo_request['properties'].keys())} | {offer_audit_label(offer)}"
+    )
+    response = requests.post(
+        "https://api.notion.com/v1/pages",
+        headers=headers,
+        json=todo_request,
+        timeout=30,
+    )
+    raise_for_notion(response, "Notion todo create")
+    todo_page = response.json()
+    existing_todos[offer_url] = {
+        "page_id": todo_page.get("id"),
+        "due": due_date,
+    }
+    audit_log(f"todo create ok | {page_audit_summary(todo_page)} | {offer_audit_label(offer)}")
+    return 1, 0
 
 
 def deduplicate_offers(open_offers):
@@ -1000,7 +1091,7 @@ def sync_to_notion(open_offers):
             )
 
     existing_offers = fetch_existing_offers(notion_data_source_id)
-    todos_enabled = bool(todo_data_source_id and "Offer URL" in todo_schema)
+    todos_enabled = bool(todo_data_source_id and todo_schema_ready(todo_schema))
     audit_log(f"todo sync enabled={todos_enabled}")
     existing_todos = {}
     if todos_enabled:
@@ -1014,7 +1105,7 @@ def sync_to_notion(open_offers):
             )
     else:
         if todo_data_source_id:
-            print("Todo sync skipped: todo data source has no Offer URL property for deduplication")
+            print("Todo sync skipped: todo data source schema is not ready for sync")
         else:
             print("Todo sync skipped: missing TODO_DATA_SOURCE_ID environment variable")
     created = 0
@@ -1070,44 +1161,16 @@ def sync_to_notion(open_offers):
             updated += 1
             existing_offers[offer_url]["opening_date"] = incoming_opening_date or previous_opening_date
             if newly_opened and todos_enabled:
-                due_date = add_days(incoming_opening_date, 2)
-                todo_existing = existing_todos.get(offer_url)
-                todo_request = todo_payload(offer, incoming_opening_date, due_date, todo_data_source_id)
-                if todo_existing:
-                    todo_page_id = todo_existing["page_id"]
-                    audit_log(
-                        f"todo action=update | page_id={short_id(todo_page_id)} | "
-                        f"due={due_date or '<empty>'} | {offer_audit_label(offer)}"
-                    )
-                    response = requests.patch(
-                        f"https://api.notion.com/v1/pages/{todo_page_id}",
-                        headers=headers,
-                        json={"properties": todo_request["properties"]},
-                        timeout=30,
-                    )
-                    raise_for_notion(response, f"Notion todo update {todo_page_id}")
-                    audit_log(f"todo update ok | {page_audit_summary(response.json())} | {offer_audit_label(offer)}")
-                    todo_updated += 1
-                else:
-                    audit_log(
-                        f"todo action=create | due={due_date or '<empty>'} | "
-                        f"payload_properties={sorted(todo_request['properties'].keys())} | "
-                        f"{offer_audit_label(offer)}"
-                    )
-                    response = requests.post(
-                        "https://api.notion.com/v1/pages",
-                        headers=headers,
-                        json=todo_request,
-                        timeout=30,
-                    )
-                    raise_for_notion(response, "Notion todo create")
-                    todo_page = response.json()
-                    existing_todos[offer_url] = {
-                        "page_id": todo_page.get("id"),
-                        "due": due_date,
-                    }
-                    audit_log(f"todo create ok | {page_audit_summary(todo_page)} | {offer_audit_label(offer)}")
-                    todo_created += 1
+                created_delta, updated_delta = upsert_todo_for_offer(
+                    headers,
+                    offer,
+                    incoming_opening_date,
+                    todo_data_source_id,
+                    todo_schema,
+                    existing_todos,
+                )
+                todo_created += created_delta
+                todo_updated += updated_delta
         else:
             status = (
                 status_property(notion_schema, "Status", ["Ouvert", "Opened"])
@@ -1137,6 +1200,17 @@ def sync_to_notion(open_offers):
             created += 1
             created_offer_urls.add(offer_url)
             audit_log(f"offer create ok | {page_audit_summary(created_page)} | {offer_audit_label(offer)}")
+            if offer.get("opening_date") and todos_enabled:
+                created_delta, updated_delta = upsert_todo_for_offer(
+                    headers,
+                    offer,
+                    offer.get("opening_date"),
+                    todo_data_source_id,
+                    todo_schema,
+                    existing_todos,
+                )
+                todo_created += created_delta
+                todo_updated += updated_delta
 
     print(
         "Notion sync: "
