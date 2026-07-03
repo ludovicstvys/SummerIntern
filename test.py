@@ -1073,46 +1073,15 @@ def sync_to_notion(open_offers):
     headers = notion_headers()
     audit_log(
         f"sync start: {len(open_offers)} offer(s), "
-        f"NOTION_DATA_SOURCE_ID={short_id(NOTION_DATA_SOURCE_ID)}, "
-        f"TODO_DATA_SOURCE_ID={short_id(TODO_DATA_SOURCE_ID) if TODO_DATA_SOURCE_ID else '<missing>'}"
+        f"NOTION_DATA_SOURCE_ID={short_id(NOTION_DATA_SOURCE_ID)}"
     )
     notion_data_source_id = resolve_data_source_id(NOTION_DATA_SOURCE_ID, "Notion internships")
     notion_schema = fetch_data_source_schema(notion_data_source_id)
-    todo_data_source_id = None
-    todo_schema = {}
-    if TODO_DATA_SOURCE_ID:
-        try:
-            todo_data_source_id = resolve_data_source_id(TODO_DATA_SOURCE_ID, "Notion todos")
-            todo_schema = fetch_data_source_schema(todo_data_source_id)
-        except requests.HTTPError:
-            print(
-                "Todo sync skipped: TODO_DATA_SOURCE_ID is not accessible. "
-                "Check that the ID is correct and shared with the Notion integration."
-            )
 
     existing_offers = fetch_existing_offers(notion_data_source_id)
-    todos_enabled = bool(todo_data_source_id and todo_schema_ready(todo_schema))
-    audit_log(f"todo sync enabled={todos_enabled}")
-    existing_todos = {}
-    if todos_enabled:
-        try:
-            existing_todos = fetch_existing_todos(todo_data_source_id)
-        except requests.HTTPError:
-            todos_enabled = False
-            print(
-                "Todo sync skipped: TODO_DATA_SOURCE_ID is not accessible. "
-                "Check that the ID is correct and shared with the Notion integration."
-            )
-    else:
-        if todo_data_source_id:
-            print("Todo sync skipped: todo data source schema is not ready for sync")
-        else:
-            print("Todo sync skipped: missing TODO_DATA_SOURCE_ID environment variable")
     created = 0
     updated = 0
     opened = 0
-    todo_created = 0
-    todo_updated = 0
     skipped_no_url = 0
     created_offer_urls = set()
     opened_offer_urls = set()
@@ -1160,17 +1129,6 @@ def sync_to_notion(open_offers):
             audit_log(f"offer update ok | {page_audit_summary(updated_page)} | {offer_audit_label(offer)}")
             updated += 1
             existing_offers[offer_url]["opening_date"] = incoming_opening_date or previous_opening_date
-            if newly_opened and todos_enabled:
-                created_delta, updated_delta = upsert_todo_for_offer(
-                    headers,
-                    offer,
-                    incoming_opening_date,
-                    todo_data_source_id,
-                    todo_schema,
-                    existing_todos,
-                )
-                todo_created += created_delta
-                todo_updated += updated_delta
         else:
             status = (
                 status_property(notion_schema, "Status", ["Ouvert", "Opened"])
@@ -1200,22 +1158,10 @@ def sync_to_notion(open_offers):
             created += 1
             created_offer_urls.add(offer_url)
             audit_log(f"offer create ok | {page_audit_summary(created_page)} | {offer_audit_label(offer)}")
-            if offer.get("opening_date") and todos_enabled:
-                created_delta, updated_delta = upsert_todo_for_offer(
-                    headers,
-                    offer,
-                    offer.get("opening_date"),
-                    todo_data_source_id,
-                    todo_schema,
-                    existing_todos,
-                )
-                todo_created += created_delta
-                todo_updated += updated_delta
 
     print(
         "Notion sync: "
         f"{created} créées, {updated} mises à jour, {opened} passées à Opened, "
-        f"{todo_created} todos créés, {todo_updated} todos mis à jour, "
         f"{skipped_no_url} sans URL ignorées"
     )
     return {
