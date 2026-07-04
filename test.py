@@ -805,6 +805,7 @@ def notion_payload(offer, data_source_id=None, schema=None):
     set_if_schema(properties, schema, "Company ID", "rich_text", rich_text(offer.get("company_id")))
     set_if_schema(properties, schema, "Job Title", "rich_text", rich_text(offer.get("name")))
     set_if_schema(properties, schema, "Offer URL", "url", {"url": offer.get("offer_url") or None})
+    set_if_schema(properties, schema, "lien offre", "url", {"url": offer.get("offer_url") or None})
     set_if_schema(properties, schema, "lien offre", "rich_text", rich_text(offer.get("offer_url")))
     set_if_schema(properties, schema, "Region", "select", {"select": {"name": offer.get("region") or "Other"}})
     set_if_schema(properties, schema, "Lieu", "rich_text", rich_text(offer.get("region")))
