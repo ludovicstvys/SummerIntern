@@ -1171,6 +1171,22 @@ def sync_to_notion(open_offers):
     }
 
 
+def empty_notion_result():
+    return {
+        "created_offer_urls": set(),
+        "opened_offer_urls": set(),
+    }
+
+
+def sync_new_offers_to_notion(new_offers, label="offre(s) nouvelle(s)"):
+    if not new_offers:
+        print(f"Notion sync skipped: 0 {label} absente(s) du CSV")
+        return empty_notion_result()
+
+    print(f"{len(new_offers)} {label} absente(s) du CSV synchronisée(s) vers Notion")
+    return sync_to_notion(new_offers)
+
+
 def log_run_summary(open_offers):
     total = len(open_offers)
     companies = len({(offer.get("company") or "").strip() for offer in open_offers if (offer.get("company") or "").strip()})
@@ -1191,8 +1207,8 @@ if __name__ == "__main__":
     previous_offers = read_process_csv("processus_ouverts.csv")
     new_offers = detect_new_offers(offres, previous_offers)
     log_run_summary(offres)
+    notion_result = sync_new_offers_to_notion(new_offers)
     csv_file = ecriture_csv(offres)
-    notion_result = sync_to_notion(offres)
     email_urls = notion_result["created_offer_urls"] | notion_result["opened_offer_urls"]
     email_offers = [offer for offer in new_offers if (offer.get("offer_url") or "").strip() in email_urls]
     if email_offers:
