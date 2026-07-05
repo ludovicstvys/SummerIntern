@@ -1,6 +1,6 @@
 import os
 
-from test import detect_new_offers, read_process_csv, send_email, sync_to_notion
+from test import detect_new_offers, read_process_csv, send_email, sync_new_offers_to_notion
 from trackr_common import (
     deduplicate_offers,
     filter_email_offers,
@@ -31,13 +31,17 @@ if __name__ == "__main__":
     offers = deduplicate_offers(scrape_open_off_cycle_internships())
     previous_offers = read_process_csv(output_file)
     force_email_all = os.getenv("FORCE_EMAIL_ALL", "").strip().lower() in ("1", "true", "yes")
-    new_offers = offers if force_email_all else detect_new_offers(offers, previous_offers)
-    email_candidates = filter_offers_by_start_term(new_offers, EMAIL_START_TERM)
+    new_offers = detect_new_offers(offers, previous_offers)
+    email_candidates = offers if force_email_all else new_offers
+    email_candidates = filter_offers_by_start_term(email_candidates, EMAIL_START_TERM)
     log_run_summary(offers)
+    notion_offers = filter_offers_by_start_term(new_offers, EMAIL_START_TERM)
+    print(f"{len(notion_offers)} nouvelle(s) offre(s) off-cycle HK {EMAIL_START_TERM} candidate(s) Notion")
+    notion_result = sync_new_offers_to_notion(
+        notion_offers,
+        f"offre(s) off-cycle HK {EMAIL_START_TERM} nouvelle(s)",
+    )
     csv_file = write_csv(offers, output_file)
-    notion_offers = filter_offers_by_start_term(offers, EMAIL_START_TERM)
-    print(f"{len(notion_offers)} offre(s) off-cycle HK {EMAIL_START_TERM} synchronisée(s) vers Notion")
-    notion_result = sync_to_notion(notion_offers)
     email_offers = filter_email_offers(email_candidates, notion_result)
     if email_offers:
         print(
