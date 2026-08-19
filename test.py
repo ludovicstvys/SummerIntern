@@ -9,6 +9,8 @@ from email.message import EmailMessage
 from html import escape
 from html.parser import HTMLParser
 
+from trackr_common import scrape_open_programmes
+
 
 def load_env_file(path=".env"):
     if not os.path.exists(path):
@@ -449,69 +451,14 @@ def offer_notes_for_notion(offer):
     )
 
 def scrape_open_summer_internships():
-    URL = "https://app.the-trackr.com/uk-finance/summer-internships"
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page    = browser.new_page()
-
-        internships = []
-        def handle_resp(response):
-            if response.request.resource_type == "xhr" and "internships" in response.url:
-                try:
-                    data = response.json()
-                    if isinstance(data, dict):
-                        lst = data.get("vacancies") or data.get("internships") or []
-                    elif isinstance(data, list):
-                        lst = data
-                    else:
-                        lst = []
-                    if isinstance(lst, list):
-                        internships.extend(lst)
-                except:
-                    pass
-
-        page.on("response", handle_resp)
-        page.goto(URL, wait_until="networkidle", timeout=60000)
-
-        prev_h = page.evaluate("() => document.body.scrollHeight")
-        while True:
-            page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(1000)
-            new_h = page.evaluate("() => document.body.scrollHeight")
-            if new_h == prev_h:
-                break
-            prev_h = new_h
-
-        browser.close()
-    valid = [i for i in internships if isinstance(i, dict)]
-    open_offers = []
-    for i in valid:
-        if i.get("openingDate") is not None:
-            company  = i.get("company")
-            title = (i.get("name") or "").strip()
-            comp = (company or {}).get("name")
-            company_id = (company or {}).get("id")
-            categories = i.get("categories") or []
-            url = (i.get("url")      or "").strip()
-            open_offers.append({
-                "name": title,
-                "company": comp,
-                "company_id": company_id,
-                "offer_url": url,
-                "region": i.get("region"),
-                "categories": categories,
-                "opening_date": iso_to_date(i.get("openingDate")),
-                "closing_date": iso_to_date(i.get("closingDate")),
-                "stage": i.get("currentStage") or "Unknown",
-                "rolling": bool(i.get("rolling")),
-                "needs_cv": bool(i.get("cv")),
-                "needs_cover_letter": bool(i.get("coverLetter") == "Yes"),
-                "company_description": (company or {}).get("description"),
-                "notes": i.get("notes"),
-            })
-
-    return open_offers
+    return scrape_open_programmes(
+        {
+            "region": "UK",
+            "industry": "Finance",
+            "season": "2027",
+            "type": "summer-internships",
+        }
+    )
 
 def read_process_csv(csv_path):
     """

@@ -44,7 +44,7 @@ def iso_to_date(value):
 
 def extract_trackr_items(data):
     if isinstance(data, dict):
-        for key in ("vacancies", "internships", "offers", "jobs", "data"):
+        for key in ("programmes", "vacancies", "internships", "offers", "jobs", "data"):
             items = data.get(key)
             if isinstance(items, list):
                 return items
