@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from email.message import EmailMessage
 from html import escape
 from html.parser import HTMLParser
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from trackr_common import scrape_open_programmes
 
@@ -499,10 +500,44 @@ def ecriture_csv(open_offers, output_file="processus_ouverts.csv"):
     return output_file
 
 
+TRACKING_QUERY_PARAMETERS = {
+    "source",
+    "iis",
+    "stype",
+    "gh_src",
+}
+
+
+def canonical_offer_url(value):
+    url = (value or "").strip()
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(url)
+        filtered_query = [
+            (name, query_value)
+            for name, query_value in parse_qsl(parts.query, keep_blank_values=True)
+            if not name.lower().startswith("utm_")
+            and name.lower() not in TRACKING_QUERY_PARAMETERS
+        ]
+        path = parts.path.rstrip("/") or "/"
+        return urlunsplit(
+            (
+                parts.scheme.lower(),
+                parts.netloc.lower(),
+                path,
+                urlencode(filtered_query, doseq=True),
+                parts.fragment,
+            )
+        )
+    except ValueError:
+        return url
+
+
 def offer_key(offer):
     url = (offer.get("offer_url") or offer.get("Offer URL") or "").strip()
     if url:
-        return f"url:{url}"
+        return f"url:{canonical_offer_url(url)}"
     company = (offer.get("company") or offer.get("Company") or "").strip().lower()
     name = (offer.get("name") or offer.get("Name") or "").strip().lower()
     return f"fallback:{company}:{name}"
@@ -852,7 +887,7 @@ def fetch_existing_offers(data_source_id=None):
             opening_value = (opening_prop or {}).get("start") or plain_text_from_property(properties.get("Date d'ouverture"))
             status_prop = properties.get("Status", {}).get("status")
             if url_prop:
-                normalized_url = url_prop.strip()
+                normalized_url = canonical_offer_url(url_prop)
                 if normalized_url in existing_offers:
                     duplicate_urls += 1
                     audit_log(
@@ -860,7 +895,7 @@ def fetch_existing_offers(data_source_id=None):
                         f"url={normalized_url}, previous_page={short_id(existing_offers[normalized_url]['page_id'])}, "
                         f"duplicate_page={short_id(page.get('id'))}"
                     )
-                existing_offers[url_prop.strip()] = {
+                existing_offers[normalized_url] = {
                     "page_id": page.get("id"),
                     "opening_date": opening_value,
                     "status": (status_prop or {}).get("name"),
@@ -1047,7 +1082,8 @@ def sync_to_notion(open_offers):
             skipped_no_url += 1
             audit_log(f"offer skipped: missing Offer URL | {offer_audit_label(offer)}")
             continue
-        existing = existing_offers.get(offer_url)
+        normalized_offer_url = canonical_offer_url(offer_url)
+        existing = existing_offers.get(normalized_offer_url)
         if existing:
             page_id = existing["page_id"]
             incoming_opening_date = offer.get("opening_date")
@@ -1076,7 +1112,7 @@ def sync_to_notion(open_offers):
             updated_page = response.json()
             audit_log(f"offer update ok | {page_audit_summary(updated_page)} | {offer_audit_label(offer)}")
             updated += 1
-            existing_offers[offer_url]["opening_date"] = incoming_opening_date or previous_opening_date
+            existing_offers[normalized_offer_url]["opening_date"] = incoming_opening_date or previous_opening_date
         else:
             status = (
                 status_property(notion_schema, "Status", ["Ouvert", "Opened"])
@@ -1098,7 +1134,7 @@ def sync_to_notion(open_offers):
             raise_for_notion(response, "Notion page create")
             created_page = response.json()
             if offer_url:
-                existing_offers[offer_url] = {
+                existing_offers[normalized_offer_url] = {
                     "page_id": created_page.get("id"),
                     "opening_date": offer.get("opening_date"),
                     "status": ((status or {}).get("status") or {}).get("name"),

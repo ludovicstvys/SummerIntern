@@ -26,6 +26,12 @@ on:
         required: false
         default: 'false'
 
+# A single run may take longer than the 10-minute schedule. Queue the next run
+# so two workers cannot read the same CSV/Notion snapshot and create duplicates.
+concurrency:
+  group: internships-scrape
+  cancel-in-progress: false
+
 # 1. autoriser l’écriture du GITHUB_TOKEN
 permissions:
   contents: write

@@ -1,5 +1,6 @@
 import csv
 from datetime import datetime
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -78,10 +79,39 @@ def scrape_open_programmes(params):
     return open_offers
 
 
+TRACKING_QUERY_PARAMETERS = {"source", "iis", "stype", "gh_src"}
+
+
+def canonical_offer_url(value):
+    url = (value or "").strip()
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(url)
+        filtered_query = [
+            (name, query_value)
+            for name, query_value in parse_qsl(parts.query, keep_blank_values=True)
+            if not name.lower().startswith("utm_")
+            and name.lower() not in TRACKING_QUERY_PARAMETERS
+        ]
+        path = parts.path.rstrip("/") or "/"
+        return urlunsplit(
+            (
+                parts.scheme.lower(),
+                parts.netloc.lower(),
+                path,
+                urlencode(filtered_query, doseq=True),
+                parts.fragment,
+            )
+        )
+    except ValueError:
+        return url
+
+
 def offer_key(offer):
     url = (offer.get("offer_url") or "").strip()
     if url:
-        return f"url:{url}"
+        return f"url:{canonical_offer_url(url)}"
     company = (offer.get("company") or "").strip().lower()
     name = (offer.get("name") or "").strip().lower()
     return f"fallback:{company}:{name}"
