@@ -50,6 +50,14 @@ def scrape_open_programmes(params):
     response.raise_for_status()
     internships = extract_trackr_items(response.json())
 
+    # Trackr occasionally answers successfully with an empty payload. Treating
+    # that as a genuine "zero offers" result would erase the reference CSV and
+    # make every offer look new on the following run.
+    if not internships:
+        raise RuntimeError(
+            "Trackr returned no programmes; keeping the existing CSV unchanged"
+        )
+
     open_offers = []
     for item in internships:
         if not isinstance(item, dict) or item.get("openingDate") is None:
@@ -143,6 +151,11 @@ def deduplicate_offers(open_offers):
 
 
 def write_csv(open_offers, output_file):
+    if not open_offers:
+        raise RuntimeError(
+            f"Refusing to overwrite {output_file} with an empty offer list"
+        )
+
     with open(output_file, mode="w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         writer.writerow(CSV_COLUMNS)
