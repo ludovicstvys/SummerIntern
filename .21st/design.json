@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "project": {
+    "name": "SummerIntern",
+    "productType": null,
+    "stack": []
+  },
+  "sources": {
+    "tokens": [],
+    "components": [],
+    "assets": [],
+    "instructions": []
+  },
+  "design": {
+    "colorMode": "unknown",
+    "colors": {},
+    "typography": {},
+    "spacing": {},
+    "radius": {},
+    "shadows": {},
+    "motion": {},
+    "density": "unknown"
+  },
+  "components": {
+    "installed": [],
+    "preferredPrimitives": [],
+    "patterns": []
+  },
+  "constraints": {
+    "must": [],
+    "avoid": []
+  },
+  "decisions": [
+    "Use a warm editorial job-intelligence aesthetic with serif display type, restrained orange accents, flat bordered surfaces, and high-density opportunity rows."
+  ],
+  "evidence": [],
+  "generatedAt": "2026-09-04T15:58:58.768Z"
+}

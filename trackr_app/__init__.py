@@ -1,0 +1,2 @@
+"""Trackr Alerts web application."""
+
