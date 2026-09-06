@@ -99,7 +99,7 @@ def queue_notion_update(db: Session, offer: Offer) -> None:
         preference = db.scalar(select(Preference).where(Preference.user_id == match.user_id))
         if not preference or not preference.user.is_active or not preference.user.notion or not preference.user.notion.data_source_id:
             continue
-        sync = db.scalar(select(NotionSync).where(NotionSync.connection_id == preference.user.notion.id, NotionSync.offer_id == offer.id))
+        sync = db.scalar(select(NotionSync).where(NotionSync.connection_id == preference.user.notion.id, NotionSync.offer_id == offer.id).with_for_update().execution_options(populate_existing=True))
         if sync:
             sync.status = "pending"
             sync.attempts = 0
