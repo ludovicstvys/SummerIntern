@@ -1,6 +1,8 @@
 from html import escape
-
-import resend
+from email.message import EmailMessage
+from email.utils import formatdate
+import hashlib
+import smtplib
 
 from .config import settings
 from .models import Offer
@@ -22,14 +24,26 @@ def offer_email_html(offers: list[Offer], title: str) -> str:
 
 
 def send_email(to: str, subject: str, html: str, idempotency_key: str) -> str:
-    if not settings.resend_api_key:
-        raise RuntimeError("RESEND_API_KEY is not configured")
-    resend.api_key = settings.resend_api_key
-    result = resend.Emails.send(
-        {"from": settings.email_from, "to": [to], "subject": subject, "html": html},
-        options={"idempotency_key": idempotency_key[:256]},
-    )
-    return result["id"]
+    if not all((settings.smtp_server, settings.smtp_user, settings.smtp_password, settings.smtp_from)):
+        raise RuntimeError("SMTP is not fully configured")
+    digest = hashlib.sha256(idempotency_key.encode()).hexdigest()
+    domain = settings.smtp_user.rsplit("@", 1)[-1] if "@" in settings.smtp_user else "trackr.local"
+    message_id = f"<{digest}@{domain}>"
+    message = EmailMessage()
+    message["From"] = settings.smtp_from
+    message["To"] = to
+    message["Subject"] = subject
+    message["Date"] = formatdate(localtime=False)
+    message["Message-ID"] = message_id
+    message.set_content("This message contains HTML. Open it in an HTML-capable email client.")
+    message.add_alternative(html, subtype="html")
+    with smtplib.SMTP(settings.smtp_server, settings.smtp_port, timeout=30) as client:
+        client.ehlo()
+        client.starttls()
+        client.ehlo()
+        client.login(settings.smtp_user, settings.smtp_password)
+        client.send_message(message)
+    return message_id
 
 
 def send_magic_link(to: str, url: str) -> str:

@@ -1,4 +1,8 @@
 import json
+import os
+from datetime import time
+from ipaddress import ip_address
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from urllib.parse import quote
 from zoneinfo import available_timezones
@@ -9,36 +13,46 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
-from sqlalchemy import select
+from sqlalchemy import select, text, delete, update
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import Base, SessionLocal, engine, get_db
 from .emailing import send_magic_link
-from .models import Invitation, MagicLink, NotionSync, Offer, Preference, User, UserOffer, UserSession, utcnow
+from .models import Delivery, Invitation, MagicLink, NotionSync, Offer, Preference, User, UserOffer, UserSession, utcnow
 from .notion import accessible_pages, create_offer_database, exchange_code, oauth_url, save_connection
 from .preferences import PROGRAM_TYPES, REGIONS, activate_preference, matching_offers
 from .security import expires_in, new_token, token_hash
+from .limits import allow_login
+from .health import SCHEMA_REVISION
 
-app = FastAPI(title="Trackr Alerts")
-app.mount("/static", StaticFiles(directory="trackr_app/static"), name="static")
-templates = Jinja2Templates(directory="trackr_app/templates")
-signer = URLSafeTimedSerializer(settings.secret_key, salt="notion-oauth")
-
-
-@app.on_event("startup")
+PACKAGE_DIR = __import__("pathlib").Path(__file__).resolve().parent
 def bootstrap() -> None:
+    settings.validate()
     # Alembic owns production schema changes; create_all makes local onboarding painless.
     if settings.database_url.startswith("sqlite"):
         Base.metadata.create_all(engine)
     if settings.admin_email:
         with SessionLocal() as db:
-            if not db.scalar(select(User).where(User.email == settings.admin_email)):
-                user = User(email=settings.admin_email, role="admin")
-                db.add(user)
-                db.flush()
-                db.add(Preference(user_id=user.id))
-                db.commit()
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+            from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+            insert = pg_insert if db.bind.dialect.name == "postgresql" else sqlite_insert
+            user_id = db.scalar(insert(User).values(email=settings.admin_email, role="admin").on_conflict_do_nothing(index_elements=[User.email]).returning(User.id))
+            if user_id:
+                db.add(Preference(user_id=user_id))
+            db.commit()
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    bootstrap()
+    yield
+
+
+app = FastAPI(title="Trackr Alerts", lifespan=lifespan)
+app.mount("/static", StaticFiles(directory=PACKAGE_DIR / "static"), name="static")
+templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
+signer = URLSafeTimedSerializer(settings.secret_key, salt="notion-oauth")
 
 
 def current_user(request: Request, db: Session) -> User | None:
@@ -82,7 +96,14 @@ def context(request: Request, db: Session, user: User | None = None, **extra):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+            if settings.is_production and connection.scalar(text("SELECT version_num FROM alembic_version")) != SCHEMA_REVISION:
+                raise RuntimeError("Schema version mismatch")
+    except Exception:
+        raise HTTPException(503, "Database unavailable")
+    return {"status": "ok", "database": "ok", "schema": SCHEMA_REVISION, "commit": os.getenv("VERCEL_GIT_COMMIT_SHA", os.getenv("APP_COMMIT", "local"))}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -96,8 +117,18 @@ def login_page(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/auth/request")
-def request_link(email: str = Form(...), db: Session = Depends(get_db)):
-    normalized = email.strip().lower()
+def request_link(request: Request, email: str = Form(...), db: Session = Depends(get_db)):
+    normalized = email.strip().lower()[:320]
+    # Only trust Vercel's overwritten proxy header inside Vercel.
+    ip = request.client.host if request.client else "unknown"
+    if os.getenv("VERCEL") == "1":
+        candidate = request.headers.get("x-vercel-forwarded-for", ip).split(",")[0].strip()
+        try:
+            ip = str(ip_address(candidate))
+        except ValueError:
+            pass
+    if not allow_login(db, normalized, ip):
+        return RedirectResponse("/login?message=" + quote("If the address is invited, a sign-in link is on its way."), 303)
     user = db.scalar(select(User).where(User.email == normalized, User.is_active.is_(True)))
     if user:
         raw = new_token()
@@ -107,7 +138,10 @@ def request_link(email: str = Form(...), db: Session = Depends(get_db)):
         try:
             send_magic_link(user.email, url)
         except Exception as exc:
-            print(f"Magic link delivery failed: {exc}; development link: {url}")
+            if settings.is_production:
+                print(f"Magic link delivery failed: {type(exc).__name__}")
+            else:
+                print(f"Magic link delivery failed: {exc}; development link: {url}")
     return RedirectResponse("/login?message=" + quote("If the address is invited, a sign-in link is on its way."), 303)
 
 
@@ -116,7 +150,13 @@ def consume_link(raw: str, db: Session = Depends(get_db)):
     link = db.scalar(select(MagicLink).where(MagicLink.token_hash == token_hash(raw)))
     if not link or link.used_at or link.expires_at.replace(tzinfo=link.expires_at.tzinfo or utcnow().tzinfo) <= utcnow():
         return RedirectResponse("/login?message=" + quote("This link is invalid or has expired."), 303)
-    link.used_at = utcnow()
+    link_user = db.get(User, link.user_id, populate_existing=True, with_for_update=True)
+    if not link_user or not link_user.is_active:
+        return RedirectResponse("/login?message=" + quote("This link is invalid or has expired."), 303)
+    consumed = db.execute(update(MagicLink).where(MagicLink.id == link.id, MagicLink.used_at.is_(None), MagicLink.expires_at > utcnow()).values(used_at=utcnow()).execution_options(synchronize_session=False))
+    if consumed.rowcount != 1:
+        db.rollback()
+        return RedirectResponse("/login?message=" + quote("This link is invalid or has expired."), 303)
     session_raw = new_token()
     db.add(UserSession(user_id=link.user_id, token_hash=token_hash(session_raw), csrf_token=new_token(), expires_at=expires_in(60 * 24 * 30)))
     invitation = db.scalar(select(Invitation).where(Invitation.email == db.get(User, link.user_id).email, Invitation.accepted_at.is_(None)))
@@ -156,25 +196,50 @@ def preferences_page(request: Request, user: User = Depends(require_user), db: S
     return templates.TemplateResponse(request, "preferences.html", context(request, db, user, preference=user.preference, program_types=json.loads(user.preference.program_types), regions=json.loads(user.preference.regions), terms=json.loads(user.preference.start_terms), all_terms=all_terms, all_types=PROGRAM_TYPES, all_regions=REGIONS))
 
 
+def preference_values(program_types, regions, start_terms, delivery_mode, digest_time, timezone):
+    if not program_types or not regions or not set(program_types).issubset(PROGRAM_TYPES) or not set(regions).issubset(REGIONS) or delivery_mode not in ("immediate", "daily_digest"):
+        raise ValueError("Choose at least one programme and region, and a valid delivery mode.")
+    if timezone not in available_timezones():
+        raise ValueError("Choose a valid timezone, for example Europe/Paris.")
+    try:
+        parsed_time = time.fromisoformat(digest_time)
+        if parsed_time.tzinfo or len(digest_time) != 5:
+            raise ValueError()
+    except ValueError:
+        raise ValueError("Enter a valid digest time in HH:MM format.")
+    return dict(program_types=json.dumps(sorted(set(program_types))), regions=json.dumps(sorted(set(regions))), start_terms=json.dumps(sorted({term.strip() for term in start_terms if term.strip()})), delivery_mode=delivery_mode, digest_time=parsed_time, timezone=timezone)
+
+
+def preference_error(request, db, user, message):
+    pref = user.preference
+    return templates.TemplateResponse(request, "preferences.html", context(request, db, user, error=message, preference=pref, program_types=json.loads(pref.program_types), regions=json.loads(pref.regions), terms=json.loads(pref.start_terms), all_terms=sorted(set(db.scalars(select(Offer.start_term).where(Offer.start_term.is_not(None))))), all_types=PROGRAM_TYPES, all_regions=REGIONS), status_code=422)
+
+
 @app.post("/preferences/preview")
 def preferences_preview(request: Request, program_types: list[str] = Form(default=[]), regions: list[str] = Form(default=[]), start_terms: list[str] = Form(default=[]), delivery_mode: str = Form("immediate"), digest_time: str = Form("08:00"), timezone: str = Form("Europe/Paris"), csrf_token: str = Form(...), user: User = Depends(require_user), db: Session = Depends(get_db)):
     csrf(request, db, csrf_token)
-    if not set(program_types).issubset(PROGRAM_TYPES) or not set(regions).issubset(REGIONS) or delivery_mode not in ("immediate", "daily_digest"):
-        raise HTTPException(422, "Invalid preferences")
-    if timezone not in available_timezones():
-        raise HTTPException(422, "Invalid timezone")
-    pref = user.preference
-    pref.program_types, pref.regions = json.dumps(program_types), json.dumps(regions)
-    pref.start_terms = json.dumps([term.strip() for term in start_terms if term.strip()])
-    pref.delivery_mode, pref.digest_time, pref.timezone, pref.status = delivery_mode, __import__("datetime").time.fromisoformat(digest_time), timezone, "draft"
-    db.commit()
-    offers = matching_offers(db, pref)
-    return templates.TemplateResponse(request, "preview.html", context(request, db, user, preference=pref, offers=offers))
+    try:
+        values = preference_values(program_types, regions, start_terms, delivery_mode, digest_time, timezone)
+    except ValueError as exc:
+        return preference_error(request, db, user, str(exc))
+    pref = Preference(user_id=user.id, **values)
+    return templates.TemplateResponse(request, "preview.html", context(request, db, user, preference=pref, offers=matching_offers(db, pref), program_types=json.loads(pref.program_types), regions=json.loads(pref.regions), start_terms=json.loads(pref.start_terms)))
 
 
 @app.post("/preferences/activate")
-def activate(request: Request, csrf_token: str = Form(...), user: User = Depends(require_user), db: Session = Depends(get_db)):
+def activate(request: Request, program_types: list[str] = Form(default=[]), regions: list[str] = Form(default=[]), start_terms: list[str] = Form(default=[]), delivery_mode: str = Form("immediate"), digest_time: str = Form("08:00"), timezone: str = Form("Europe/Paris"), csrf_token: str = Form(...), user: User = Depends(require_user), db: Session = Depends(get_db)):
     csrf(request, db, csrf_token)
+    try:
+        values = preference_values(program_types, regions, start_terms, delivery_mode, digest_time, timezone)
+    except ValueError as exc:
+        return preference_error(request, db, user, str(exc))
+    # Serialize preference changes with workers and account deactivation.
+    db.refresh(user, with_for_update=True)
+    if not user.is_active:
+        raise HTTPException(403)
+    db.refresh(user.preference)
+    for key, value in values.items():
+        setattr(user.preference, key, value)
     count = activate_preference(db, user.preference)
     return RedirectResponse(f"/dashboard?activated={count}", 303)
 
@@ -205,7 +270,7 @@ def invite(request: Request, email: str = Form(...), csrf_token: str = Form(...)
     try:
         send_magic_link(user.email, f"{settings.app_url}/auth/consume/{raw}")
     except Exception as exc:
-        print(f"Invitation delivery failed: {exc}")
+        print(f"Invitation delivery failed: {type(exc).__name__}")
     return RedirectResponse("/admin", 303)
 
 
@@ -215,7 +280,14 @@ def toggle_user(user_id: int, request: Request, csrf_token: str = Form(...), adm
     target = db.get(User, user_id)
     if not target or target.id == admin.id:
         raise HTTPException(400)
+    db.refresh(target, with_for_update=True)
     target.is_active = not target.is_active
+    if not target.is_active:
+        db.execute(delete(UserSession).where(UserSession.user_id == target.id))
+        db.execute(delete(MagicLink).where(MagicLink.user_id == target.id))
+        db.execute(update(Delivery).where(Delivery.user_id == target.id, Delivery.status.in_(["pending", "processing", "failed"])).values(status="cancelled", processing_started_at=None))
+        if target.notion:
+            db.execute(update(NotionSync).where(NotionSync.connection_id == target.notion.id, NotionSync.status.in_(["pending", "failed"])).values(status="cancelled"))
     db.commit()
     return RedirectResponse("/admin", 303)
 
@@ -235,7 +307,9 @@ def notion_callback(code: str, state: str, user: User = Depends(require_user), d
         raise HTTPException(400, "Invalid OAuth state")
     if data.get("user_id") != user.id:
         raise HTTPException(403)
-    save_connection(db, user.id, exchange_code(code))
+    payload = exchange_code(code)
+    db.refresh(user, with_for_update=True)
+    save_connection(db, user.id, payload)
     return RedirectResponse("/notion/setup", 303)
 
 
@@ -253,6 +327,9 @@ def notion_setup(request: Request, user: User = Depends(require_user), db: Sessi
 @app.post("/notion/setup")
 def notion_create(request: Request, page_id: str = Form(...), csrf_token: str = Form(...), user: User = Depends(require_user), db: Session = Depends(get_db)):
     csrf(request, db, csrf_token)
+    db.refresh(user, with_for_update=True)
+    if not user.notion:
+        return RedirectResponse("/notion/connect", 303)
     create_offer_database(db, user.notion, page_id)
     for offer in matching_offers(db, user.preference):
         if not db.scalar(select(NotionSync).where(NotionSync.connection_id == user.notion.id, NotionSync.offer_id == offer.id)):
@@ -264,6 +341,8 @@ def notion_create(request: Request, page_id: str = Form(...), csrf_token: str = 
 @app.post("/notion/disconnect")
 def notion_disconnect(request: Request, csrf_token: str = Form(...), user: User = Depends(require_user), db: Session = Depends(get_db)):
     csrf(request, db, csrf_token)
+    db.refresh(user, with_for_update=True)
     if user.notion:
+        db.execute(delete(NotionSync).where(NotionSync.connection_id == user.notion.id))
         db.delete(user.notion); db.commit()
     return RedirectResponse("/dashboard", 303)

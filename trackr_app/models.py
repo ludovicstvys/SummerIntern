@@ -64,6 +64,7 @@ class Preference(Base):
     timezone: Mapped[str] = mapped_column(String(64), default="Europe/Paris")
     status: Mapped[str] = mapped_column(String(20), default="draft")
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_digest_date: Mapped[date | None] = mapped_column(Date)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     user: Mapped[User] = relationship(back_populates="preference")
 
@@ -90,6 +91,7 @@ class Offer(Base):
     notes: Mapped[str | None] = mapped_column(Text)
     is_open: Mapped[bool] = mapped_column(Boolean, default=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    missing_collections: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -115,6 +117,7 @@ class Delivery(Base):
     provider_message_id: Mapped[str | None] = mapped_column(String(200))
     last_error: Mapped[str | None] = mapped_column(Text)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -144,3 +147,10 @@ class NotionSync(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text)
     synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class AuthLimit(Base):
+    __tablename__ = "auth_limits"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

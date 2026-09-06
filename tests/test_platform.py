@@ -75,6 +75,15 @@ class PlatformTests(unittest.TestCase):
         winter_utc = datetime(2026, 1, 4, 9, 0, tzinfo=timezone.utc)
         self.assertTrue(digest_is_due(self.preference, winter_utc))
 
+    def test_digest_remains_due_after_scheduled_minute(self):
+        self.preference.delivery_mode = "daily_digest"
+        self.preference.digest_time = time(10, 0)
+        self.preference.timezone = "Europe/Paris"
+        delayed_utc = datetime(2026, 1, 4, 10, 17, tzinfo=timezone.utc)
+        self.assertTrue(digest_is_due(self.preference, delayed_utc))
+        self.preference.last_digest_date = delayed_utc.astimezone(__import__("zoneinfo").ZoneInfo("Europe/Paris")).date()
+        self.assertFalse(digest_is_due(self.preference, delayed_utc))
+
 
 if __name__ == "__main__":
     unittest.main()

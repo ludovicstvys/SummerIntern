@@ -2,10 +2,6 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
-import sys
-import types
-
-sys.modules.setdefault("requests", types.SimpleNamespace(get=Mock()))
 import trackr_common
 
 

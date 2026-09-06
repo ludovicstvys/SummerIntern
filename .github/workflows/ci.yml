@@ -1,0 +1,41 @@
+name: CI
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: trackr
+          POSTGRES_PASSWORD: trackr
+          POSTGRES_DB: trackr_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U trackr -d trackr_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      PYTHON_DOTENV_DISABLED: "1"
+      DATABASE_URL: sqlite://
+      TEST_DATABASE_URL: postgresql+psycopg://trackr:trackr@localhost:5432/trackr_test
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pip check
+      - run: python -m compileall -q trackr_app *.py
+      - run: python -m pytest -q
+      - name: Validate PostgreSQL migrations
+        env:
+          DATABASE_URL: postgresql+psycopg://trackr:trackr@localhost:5432/trackr_test
+        run: |
+          alembic upgrade head
+          alembic current

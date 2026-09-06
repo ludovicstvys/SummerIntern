@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+.env
+*.csv
+*.db
+__pycache__
+tests
+alembic
+scrape_*.py
+test.py
+test_trackr_common.py
+
+scripts
+.env.*

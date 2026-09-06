@@ -43,6 +43,28 @@ def matching_offers(db: Session, preference: Preference) -> list[Offer]:
 def activate_preference(db: Session, preference: Preference) -> int:
     preference.status = "active"
     preference.activated_at = utcnow()
+    # Keep already delivered history; reconcile only unfinished alerts.
+    deliveries = db.scalars(select(Delivery).where(Delivery.user_id == preference.user_id)).all()
+    sent_offers = {item.offer_id for item in deliveries if item.status == "sent"}
+    by_mode = {(item.offer_id, item.mode): item for item in deliveries}
+    for item in deliveries:
+        if item.status not in ("pending", "processing", "failed"):
+            continue
+        offer = db.get(Offer, item.offer_id)
+        if item.offer_id in sent_offers or not offer or not offer.is_open or not offer_matches(offer, preference):
+            item.status = "cancelled"
+            item.processing_started_at = None
+        elif item.mode != preference.delivery_mode:
+            previous_status = item.status
+            item.status = "cancelled"
+            item.processing_started_at = None
+            target = by_mode.get((item.offer_id, preference.delivery_mode))
+            if target is None:
+                target = Delivery(user_id=preference.user_id, offer_id=item.offer_id, mode=preference.delivery_mode, attempts=item.attempts, status="failed" if previous_status == "failed" else "pending")
+                db.add(target)
+                by_mode[(item.offer_id, preference.delivery_mode)] = target
+            elif target.status == "cancelled":
+                target.status = "failed" if target.attempts >= 5 else "pending"
     offers = matching_offers(db, preference)
     for offer in offers:
         existing = db.scalar(select(UserOffer).where(UserOffer.user_id == preference.user_id, UserOffer.offer_id == offer.id))
@@ -75,7 +97,7 @@ def queue_notion_update(db: Session, offer: Offer) -> None:
     matches = db.scalars(select(UserOffer).where(UserOffer.offer_id == offer.id)).all()
     for match in matches:
         preference = db.scalar(select(Preference).where(Preference.user_id == match.user_id))
-        if not preference or not preference.user.notion or not preference.user.notion.data_source_id:
+        if not preference or not preference.user.is_active or not preference.user.notion or not preference.user.notion.data_source_id:
             continue
         sync = db.scalar(select(NotionSync).where(NotionSync.connection_id == preference.user.notion.id, NotionSync.offer_id == offer.id))
         if sync:
@@ -91,5 +113,6 @@ def digest_is_due(preference: Preference, now: datetime | None = None) -> bool:
         local = now.astimezone(ZoneInfo(preference.timezone))
     except ZoneInfoNotFoundError:
         return False
-    target = preference.digest_time
-    return local.hour == target.hour and local.minute == target.minute
+    if preference.last_digest_date == local.date():
+        return False
+    return local.time().replace(tzinfo=None) >= preference.digest_time

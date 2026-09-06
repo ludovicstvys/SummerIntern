@@ -2,11 +2,11 @@ import json
 from urllib.parse import urlencode
 
 import requests
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .models import NotionConnection, NotionSync, Offer, utcnow
+from .models import NotionConnection, NotionSync, Offer, User, utcnow
 from .security import decrypt, encrypt
 
 
@@ -32,6 +32,10 @@ def exchange_code(code: str) -> dict:
 
 def save_connection(db: Session, user_id: int, payload: dict) -> NotionConnection:
     connection = db.scalar(select(NotionConnection).where(NotionConnection.user_id == user_id)) or NotionConnection(user_id=user_id, access_token_encrypted="")
+    if connection.id and connection.workspace_id != payload.get("workspace_id"):
+        db.execute(delete(NotionSync).where(NotionSync.connection_id == connection.id))
+        connection.database_id = None
+        connection.data_source_id = None
     connection.access_token_encrypted = encrypt(payload["access_token"])
     connection.refresh_token_encrypted = encrypt(payload.get("refresh_token"))
     connection.workspace_id = payload.get("workspace_id")
@@ -44,10 +48,24 @@ def save_connection(db: Session, user_id: int, payload: dict) -> NotionConnectio
 
 
 def accessible_pages(connection: NotionConnection) -> list[dict]:
-    response = requests.post("https://api.notion.com/v1/search", headers=headers(decrypt(connection.access_token_encrypted)), json={"filter": {"property": "object", "value": "page"}, "page_size": 100}, timeout=30)
-    response.raise_for_status()
     pages = []
-    for page in response.json().get("results", []):
+    results = []
+    cursor = None
+    while True:
+        payload = {"filter": {"property": "object", "value": "page"}, "page_size": 100}
+        if cursor:
+            payload["start_cursor"] = cursor
+        response = requests.post("https://api.notion.com/v1/search", headers=headers(decrypt(connection.access_token_encrypted)), json=payload, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+        results.extend(data.get("results", []))
+        if not data.get("has_more"):
+            break
+        next_cursor = data.get("next_cursor")
+        if not next_cursor or next_cursor == cursor:
+            raise RuntimeError("Invalid Notion pagination")
+        cursor = next_cursor
+    for page in results:
         title_parts = []
         for prop in page.get("properties", {}).values():
             if prop.get("type") == "title":
@@ -73,6 +91,7 @@ def create_offer_database(db: Session, connection: NotionConnection, parent_page
     )
     response.raise_for_status()
     result = response.json()
+    db.execute(delete(NotionSync).where(NotionSync.connection_id == connection.id))
     connection.database_id = result["id"]
     sources = result.get("data_sources") or []
     connection.data_source_id = sources[0]["id"] if sources else None
@@ -81,7 +100,7 @@ def create_offer_database(db: Session, connection: NotionConnection, parent_page
         detail.raise_for_status()
         connection.data_source_id = detail.json()["data_sources"][0]["id"]
     connection.last_error = None
-    db.commit()
+    db.flush()
 
 
 def _rich(value):
@@ -104,15 +123,29 @@ def offer_properties(offer: Offer) -> dict:
 
 
 def process_notion_queue(db: Session) -> int:
-    jobs = db.scalars(select(NotionSync).where(NotionSync.status == "pending", NotionSync.attempts < 5)).all()
+    jobs = db.execute(select(NotionSync.id, NotionConnection.user_id).join(NotionConnection, NotionConnection.id == NotionSync.connection_id).where(NotionSync.status == "pending", NotionSync.attempts < 5)).all()
+    db.commit()
     completed = 0
-    for job in jobs:
+    for job_id, user_id in jobs:
+        user = db.scalar(select(User).where(User.id == user_id).with_for_update(skip_locked=True).execution_options(populate_existing=True))
+        if not user:
+            db.rollback()
+            continue
+        job = db.get(NotionSync, job_id, populate_existing=True, with_for_update=True)
+        if not job or job.status != "pending":
+            db.commit()
+            continue
+        if not user.is_active:
+            job.status = "cancelled"
+            db.commit()
+            continue
         connection = db.get(NotionConnection, job.connection_id)
         offer = db.get(Offer, job.offer_id)
         if not connection or not connection.data_source_id or not offer:
+            db.commit()
             continue
-        token = decrypt(connection.access_token_encrypted)
         try:
+            token = decrypt(connection.access_token_encrypted)
             if not job.notion_page_id:
                 lookup = requests.post(
                     f"https://api.notion.com/v1/data_sources/{connection.data_source_id}/query",
@@ -135,7 +168,7 @@ def process_notion_queue(db: Session) -> int:
             completed += 1
         except Exception as exc:
             job.attempts += 1
-            job.last_error = str(exc)[:2000]
+            job.last_error = type(exc).__name__
             job.status = "failed" if job.attempts >= 5 else "pending"
             connection.last_error = job.last_error
         db.commit()

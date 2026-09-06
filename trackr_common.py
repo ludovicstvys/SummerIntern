@@ -48,7 +48,19 @@ def extract_trackr_items(data):
 def scrape_open_programmes(params):
     response = requests.get(TRACKR_API_URL, params=params, timeout=30)
     response.raise_for_status()
-    internships = extract_trackr_items(response.json())
+    payload = response.json()
+    internships = extract_trackr_items(payload)
+    # A paginated or explicitly partial response is not a complete snapshot.
+    if isinstance(payload, dict):
+        metadata = [payload] + [payload[key] for key in ("pagination", "meta") if isinstance(payload.get(key), dict)]
+        for meta in metadata:
+            if any(meta.get(key) for key in ("has_more", "hasMore", "next_cursor", "nextCursor", "next", "partial")):
+                raise RuntimeError("Trackr returned a partial snapshot")
+            total = meta.get("total", meta.get("totalCount"))
+            if isinstance(total, int) and total > len(internships):
+                raise RuntimeError("Trackr returned fewer programmes than its total")
+    if any(not isinstance(item, dict) for item in internships):
+        raise RuntimeError("Trackr returned malformed programmes")
 
     # Trackr occasionally answers successfully with an empty payload. Treating
     # that as a genuine "zero offers" result would erase the reference CSV and
@@ -63,6 +75,8 @@ def scrape_open_programmes(params):
         if not isinstance(item, dict) or item.get("openingDate") is None:
             continue
 
+        if not item.get("url") or not item.get("name") or not iso_to_date(item.get("openingDate")):
+            raise RuntimeError("Trackr returned an incomplete open programme")
         company = item.get("company") or {}
         categories = item.get("categories") or []
         open_offers.append(

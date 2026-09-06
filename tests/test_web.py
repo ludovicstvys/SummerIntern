@@ -57,3 +57,10 @@ class WebAuthTests(unittest.TestCase):
             db.commit()
         response = self.client.get(f"/auth/consume/{raw}", follow_redirects=False)
         self.assertEqual(response.headers["location"].split("?")[0], "/login")
+
+    def test_health_checks_database(self):
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["database"], "ok")
+        self.assertEqual(response.json()["schema"], "20260906_0003")
+        self.assertIn("commit", response.json())

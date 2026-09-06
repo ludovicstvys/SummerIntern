@@ -1,136 +1,58 @@
-name: Scrape Notion
-
+name: Legacy CSV and Notion scrape
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: "*/10 * * * *"
   workflow_dispatch:
-    inputs:
-      notify_fr_all:
-        description: 'Envoyer toutes les offres FR off-cycle, même déjà présentes dans le CSV'
-        required: false
-        default: 'false'
-      notify_fr_summer_all:
-        description: 'Envoyer toutes les offres FR summer, même déjà présentes dans le CSV'
-        required: false
-        default: 'false'
-      notify_uk_off_cycle_all:
-        description: 'Envoyer toutes les offres UK off-cycle, même déjà présentes dans le CSV'
-        required: false
-        default: 'false'
-      notify_hk_summer_all:
-        description: 'Envoyer toutes les offres HK summer, même déjà présentes dans le CSV'
-        required: false
-        default: 'false'
-      notify_hk_off_cycle_all:
-        description: 'Envoyer toutes les offres HK off-cycle, même déjà présentes dans le CSV'
-        required: false
-        default: 'false'
-
-# A single run may take longer than the 10-minute schedule. Queue the next run
-# so two workers cannot read the same CSV/Notion snapshot and create duplicates.
 concurrency:
-  group: internships-scrape
+  group: legacy-internships-scrape
   cancel-in-progress: false
-
-# 1. autoriser l’écriture du GITHUB_TOKEN
 permissions:
   contents: write
-
 jobs:
   scrape:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
-          persist-credentials: true
-
-      - name: Setup Python & Playwright
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
+          python-version: "3.12"
+          cache: pip
+      - name: Install legacy dependencies
         run: |
-          pip install --upgrade pip
-          pip install playwright requests
-          python -m playwright install --with-deps
-
-      - name: Run scraper and sync to Notion
+          python -m pip install --upgrade pip
+          python -m pip install playwright requests
+          python -m playwright install --with-deps chromium
+      - name: Run all legacy collectors independently
+        id: collectors
+        continue-on-error: true
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
+          TODO_DATA_SOURCE_ID: ${{ secrets.TODO_DATA_SOURCE_ID }}
           SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS_APP: ${{ secrets.SMTP_PASS_APP }}
-        run: python test.py
-
-      - name: Run FR off-cycle scraper
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
-          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS_APP: ${{ secrets.SMTP_PASS_APP }}
-          FORCE_EMAIL_ALL: ${{ github.event.inputs.notify_fr_all }}
-        run: python scrape_off_cycle_fr.py
-
-      - name: Run FR summer scraper
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
-          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS_APP: ${{ secrets.SMTP_PASS_APP }}
-          FORCE_EMAIL_ALL: ${{ github.event.inputs.notify_fr_summer_all }}
-        run: python scrape_summer_fr.py
-
-      - name: Run UK off-cycle scraper
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
-          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS_APP: ${{ secrets.SMTP_PASS_APP }}
-          FORCE_EMAIL_ALL: ${{ github.event.inputs.notify_uk_off_cycle_all }}
-        run: python scrape_off_cycle_uk.py
-
-      - name: Run HK summer scraper
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
-          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS_APP: ${{ secrets.SMTP_PASS_APP }}
-          FORCE_EMAIL_ALL: ${{ github.event.inputs.notify_hk_summer_all }}
-        run: python scrape_summer_hk.py
-
-      - name: Run HK off-cycle scraper
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATA_SOURCE_ID: ${{ secrets.NOTION_DATA_SOURCE_ID }}
-          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS_APP: ${{ secrets.SMTP_PASS_APP }}
-          FORCE_EMAIL_ALL: ${{ github.event.inputs.notify_hk_off_cycle_all }}
-        run: python scrape_off_cycle_hk.py
-
-      - name: Commit and push updated CSV
+          FROM_ADDR: ${{ secrets.SMTP_USER }}
+          TO_ADDRS: ${{ secrets.TO_ADDRS }}
+        run: |
+          failed=0
+          for script in test.py scrape_off_cycle_fr.py scrape_summer_fr.py scrape_off_cycle_uk.py scrape_summer_hk.py scrape_off_cycle_hk.py; do
+            python "$script" || failed=1
+          done
+          exit "$failed"
+      - name: Commit valid CSV updates
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add processus_ouverts.csv processus_ouverts_fr_off_cycle.csv processus_ouverts_fr_summer.csv processus_ouverts_uk_off_cycle.csv processus_ouverts_hk_summer.csv processus_ouverts_hk_off_cycle.csv
           if ! git diff --cached --quiet; then
             git commit -m "Mise à jour des CSV internships"
             git push
-          else
-            echo "Aucun changement détecté dans les CSV, rien à push."
           fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Report partial collector failure
+        if: steps.collectors.outcome == 'failure'
+        run: exit 1
