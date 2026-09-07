@@ -9,7 +9,7 @@ from sqlalchemy import select
 from tests.test_audit import db, user, offer, client
 from trackr_app.models import Delivery, Invitation, LegacyTask, MagicLink, NotionConnection, Offer, OfferSource, User
 from trackr_app.invitations import deliver_invitation, process_invitations
-from trackr_app.legacy import enqueue, process_tasks
+from trackr_app.legacy import enqueue, process_tasks, reconcile_summer_snapshot, cancel_legacy_notion_window, run_collector
 from trackr_app.preferences import offer_matches, offer_is_open
 from trackr_app.scraper import scrape_all
 from trackr_app.security import encrypt
@@ -164,7 +164,57 @@ def test_missing_legacy_recipients_preserve_csv_and_do_not_block_notion(db, tmp_
     monkeypatch.setenv('LEGACY_EMAIL_ENABLED', 'true')
     path = tmp_path/'offers.csv'; path.write_text('old snapshot')
     item = {'name': 'Role', 'offer_url': 'https://example.com/new'}
-    with patch('trackr_app.legacy.SessionLocal', sessionmaker(bind=db.bind)), patch('trackr_app.legacy.scrape_open_programmes', return_value=[item]), patch.object(adapter, 'read_process_csv', return_value=[]), patch.object(adapter, 'read_email_recipients', return_value=[]), patch.object(adapter, 'NOTION_TOKEN', 'test'), patch.object(adapter, 'NOTION_DATA_SOURCE_ID', 'test'), patch.object(adapter, 'sync_to_notion') as sync:
+    with patch('trackr_app.legacy.SessionLocal', sessionmaker(bind=db.bind)), patch('trackr_app.legacy.scrape_open_programmes', return_value=[item]), patch.object(adapter, 'read_process_csv', return_value=[]), patch.object(adapter, 'read_email_recipients', return_value=[]), patch.object(adapter, 'NOTION_TOKEN', 'test'), patch.object(adapter, 'NOTION_DATA_SOURCE_ID', 'test'), patch.object(adapter, 'prepare_notion_sync', return_value={'existing_offers': {}, 'data_source_id': 'test', 'schema': {}}), patch.object(adapter, 'sync_to_notion') as sync:
         assert run_collector({'season': '2027', 'region': 'France', 'type': 'summer-internships'}, path, 'Summer') == 1
     assert path.read_text() == 'old snapshot'
     assert sync.call_count == 1
+
+
+def test_legacy_notion_circuit_breaker_leaves_tasks_pending(db, monkeypatch):
+    monkeypatch.setenv('LEGACY_NOTION_ENABLED', 'false')
+    enqueue(db, 'source', 'notion', '', {'name': 'Intern', 'offer_url': 'https://example.com/role'}, 'internship'); db.commit()
+    adapter = SimpleNamespace(sync_to_notion=Mock())
+    assert process_tasks(db, 'source', adapter) == 0
+    adapter.sync_to_notion.assert_not_called()
+    assert db.query(LegacyTask).one().status == 'pending'
+
+
+def test_unchanged_legacy_collection_does_not_enqueue_notion_twice(db, tmp_path, monkeypatch):
+    import test as adapter
+    from sqlalchemy.orm import sessionmaker
+    monkeypatch.setenv('LEGACY_NOTION_ENABLED', 'true')
+    monkeypatch.setenv('LEGACY_EMAIL_ENABLED', 'false')
+    path = tmp_path/'offers.csv'
+    item = {'name': 'Role', 'offer_url': 'https://example.com/new', 'company': 'Example', 'categories': [], 'opening_date': '2026-09-01', 'closing_date': None, 'region': 'France', 'stage': 'Unknown', 'rolling': False, 'needs_cv': False, 'needs_cover_letter': False, 'company_id': None, 'company_description': None, 'notes': None}
+    with patch('trackr_app.legacy.SessionLocal', sessionmaker(bind=db.bind)), patch('trackr_app.legacy.scrape_open_programmes', return_value=[item]), patch.object(adapter, 'NOTION_TOKEN', 'test'), patch.object(adapter, 'NOTION_DATA_SOURCE_ID', 'test'), patch.object(adapter, 'prepare_notion_sync', return_value={'existing_offers': {}, 'data_source_id': 'test', 'schema': {}}), patch.object(adapter, 'sync_to_notion') as sync:
+        run_collector({'season': '2027', 'region': 'France', 'type': 'summer-internships'}, path, 'Summer')
+        run_collector({'season': '2027', 'region': 'France', 'type': 'summer-internships'}, path, 'Summer')
+    assert sync.call_count == 1
+    assert db.query(LegacyTask).filter_by(channel='notion').count() == 1
+
+
+def test_summer_reconciliation_reports_ambiguity_and_only_applies_missing(tmp_path):
+    headers = 'Name,Company,Offer URL\nKnown,Example,https://example.com/known\nAmbiguous,Example,https://example.com/new-url\nMissing,Example,https://example.com/missing\n'
+    for name in ('processus_ouverts.csv', 'processus_ouverts_fr_summer.csv', 'processus_ouverts_hk_summer.csv'):
+        (tmp_path/name).write_text(headers)
+    adapter = SimpleNamespace(
+        read_process_csv=lambda path: __import__('csv').DictReader(open(path, newline='')),
+        prepare_notion_sync=Mock(return_value={'existing_offers': {'https://example.com/known': {'page_id': 'known'}}, 'historical_offers': [{'page_id': 'old', 'name': 'Ambiguous', 'company': 'Example'}]}),
+        sync_to_notion=Mock(),
+    )
+    report = reconcile_summer_snapshot(adapter, tmp_path)
+    assert report['missing'] == 1 and report['created'] == 0 and report['ambiguous'][0]['page_ids'] == ['old']
+    report = reconcile_summer_snapshot(adapter, tmp_path, apply=True)
+    assert report['created'] == 1
+    assert adapter.sync_to_notion.call_args.args[0][0]['name'] == 'Missing'
+
+
+def test_faulty_run_remediation_is_dry_run_then_cancels_only_pending(db):
+    pending = LegacyTask(key='pending', source='source', channel='notion', recipient='', payload='{}')
+    sent = LegacyTask(key='sent', source='source', channel='notion', recipient='', payload='{}', status='sent')
+    db.add_all([pending, sent]); db.commit()
+    start = pending.created_at - timedelta(seconds=1); end = pending.created_at + timedelta(seconds=1)
+    assert cancel_legacy_notion_window(db, start, end) == {'matched': 1, 'cancelled': 0, 'applied': False}
+    assert pending.status == 'pending'
+    assert cancel_legacy_notion_window(db, start, end, apply=True)['cancelled'] == 1
+    assert pending.status == 'cancelled' and sent.status == 'sent'

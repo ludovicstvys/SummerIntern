@@ -1,6 +1,7 @@
 import argparse
 import json
 import time
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select, delete
 
@@ -12,6 +13,7 @@ from .operations import lock_state, insert_for
 from .preferences import activate_preference
 from .scraper import scrape_all
 from .workers import process_digests, process_immediate_alerts, sync_notion
+from .legacy import reconcile_summer_snapshot, cancel_legacy_notion_window
 
 
 def run_command(command):
@@ -88,18 +90,32 @@ def maintenance(args):
             result = operational_status(db)
             print(json.dumps(result))
             return int(result['status'] != 'ok')
+        elif args.command == 'reconcile-legacy-summer':
+            import test as legacy_adapter
+            result = reconcile_summer_snapshot(legacy_adapter, args.snapshot_dir, apply=args.apply)
+            print(json.dumps(result, default=str))
+        elif args.command == 'remediate-legacy-notion':
+            start = datetime.fromisoformat(args.start.replace('Z', '+00:00')) if args.start else datetime(2026, 9, 7, 12, 21, 0, tzinfo=timezone.utc)
+            end = datetime.fromisoformat(args.end.replace('Z', '+00:00')) if args.end else datetime(2026, 9, 7, 12, 30, 0, tzinfo=timezone.utc)
+            if start.tzinfo is None or end.tzinfo is None:
+                raise ValueError('--start and --end must include a timezone')
+            print(json.dumps(cancel_legacy_notion_window(db, start, end, apply=args.apply)))
     return 0
 
 
 def main():
     parser = argparse.ArgumentParser(description="Trackr Alerts background commands")
-    parser.add_argument("command", choices=("scrape-all", "process-immediate-alerts", "process-digests", "digest-worker", "sync-notion", 'process-invitations', 'retry-failed', 'promote-admin', 'import-legacy-subscribers', 'check-operations'))
+    parser.add_argument("command", choices=("scrape-all", "process-immediate-alerts", "process-digests", "digest-worker", "sync-notion", 'process-invitations', 'retry-failed', 'promote-admin', 'import-legacy-subscribers', 'check-operations', 'reconcile-legacy-summer', 'remediate-legacy-notion'))
     parser.add_argument('--kind', choices=['email', 'notion', 'invitation', 'legacy'])
     parser.add_argument('--id')
     parser.add_argument('--email')
+    parser.add_argument('--apply', action='store_true', help='perform the otherwise read-only remediation or reconciliation')
+    parser.add_argument('--snapshot-dir', default='.')
+    parser.add_argument('--start')
+    parser.add_argument('--end')
     args = parser.parse_args()
     command = args.command
-    if command in ('retry-failed', 'promote-admin', 'import-legacy-subscribers', 'check-operations'):
+    if command in ('retry-failed', 'promote-admin', 'import-legacy-subscribers', 'check-operations', 'reconcile-legacy-summer', 'remediate-legacy-notion'):
         raise SystemExit(maintenance(args))
     if command == "digest-worker":
         while True:

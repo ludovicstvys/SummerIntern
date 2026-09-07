@@ -75,6 +75,22 @@ Provider revocation requires reconnecting. Automatic refresh-token exchange is n
 
 The six original entry points remain supported. They share validation and atomic CSV replacement, and persist independent email/Notion tasks in the same `DATABASE_URL` before writing CSV. A failed SMTP or Notion request is replayable even after the CSV has been updated. Upstream errors do not block retrying existing tasks.
 
+`LEGACY_NOTION_ENABLED` is a circuit breaker for this shared historical Notion database. It defaults to `true` in code, but is currently passed as `false` by the scheduled workflow during the September 2026 remediation. Legacy Notion writes are enqueued only for URLs absent from the previous CSV; normal runs do not bulk-resync existing offers.
+
+The Summer remediation is read-only unless `--apply` is explicitly supplied:
+
+```sh
+# Inspect the preserved UK, France and Hong Kong Summer CSV snapshots.
+python -m trackr_app.cli reconcile-legacy-summer --snapshot-dir .
+# After reviewing missing/ambiguous entries, create only unambiguous missing pages.
+python -m trackr_app.cli reconcile-legacy-summer --snapshot-dir . --apply
+# Inspect, then cancel pending Notion tasks created by the faulty 7 September run.
+python -m trackr_app.cli remediate-legacy-notion
+python -m trackr_app.cli remediate-legacy-notion --apply
+```
+
+Pages with no URL or a conflicting name/company match are reported as ambiguous; the commands never edit, merge, or archive them.
+
 The historical workflow now needs the shared database and its migrations. `LEGACY_EMAIL_ENABLED=true` preserves delivery to **unmigrated** recipients from `TO_ADDRS` (or a private local `email.csv`). Every address that has a platform account, active or disabled, is excluded from historical mail. This prevents duplicate channels and makes account deactivation effective. Recipients receive separate messages, never a shared `To` header. `email.csv` is no longer versioned; configure `TO_ADDRS` for GitHub Actions before deployment if recipients previously came only from that file.
 
 To migrate the private recipient list to platform accounts:

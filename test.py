@@ -754,7 +754,7 @@ def todo_payload(offer, opened_on, due_on, data_source_id=None, schema=None):
     return payload
 
 
-def fetch_existing_offers(data_source_id=None):
+def fetch_existing_offers(data_source_id=None, include_historical=False):
     headers = notion_headers()
     target_data_source_id = data_source_id or NOTION_DATA_SOURCE_ID
 
@@ -764,6 +764,7 @@ def fetch_existing_offers(data_source_id=None):
     duplicate_urls = 0
     pages_without_url = 0
     page_number = 0
+    historical = []
 
     while True:
         payload = {"page_size": 100}
@@ -808,6 +809,13 @@ def fetch_existing_offers(data_source_id=None):
                 }
             else:
                 pages_without_url += 1
+            if include_historical:
+                historical.append({
+                    'page_id': page.get('id'),
+                    'name': plain_text_from_property(properties.get('Job Title')) or plain_text_from_property(properties.get('Name')),
+                    'company': plain_text_from_property(properties.get('Entreprise')) or plain_text_from_property(properties.get('Company')),
+                    'offer_url': canonical_offer_url(url_prop),
+                })
 
         if not data.get("has_more"):
             break
@@ -818,7 +826,7 @@ def fetch_existing_offers(data_source_id=None):
         f"{pages_seen} page(s) scanned, {duplicate_urls} duplicate URL(s), "
         f"{pages_without_url} page(s) without Offer URL/lien offre"
     )
-    return existing_offers
+    return (existing_offers, historical) if include_historical else existing_offers
 
 
 def fetch_existing_todos(data_source_id=None):
@@ -953,7 +961,17 @@ def deduplicate_offers(open_offers):
     return deduped
 
 
-def sync_to_notion(open_offers):
+def prepare_notion_sync(include_historical=False):
+    if not NOTION_TOKEN or not NOTION_DATA_SOURCE_ID:
+        raise RuntimeError('Missing Notion configuration')
+    notion_data_source_id = resolve_data_source_id(NOTION_DATA_SOURCE_ID, 'Notion internships')
+    notion_schema = fetch_data_source_schema(notion_data_source_id)
+    result = fetch_existing_offers(notion_data_source_id, include_historical=include_historical)
+    existing_offers, historical = result if include_historical else (result, [])
+    return {'data_source_id': notion_data_source_id, 'schema': notion_schema, 'existing_offers': existing_offers, 'historical_offers': historical}
+
+
+def sync_to_notion(open_offers, context=None):
     if not NOTION_TOKEN:
         raise RuntimeError("Missing NOTION_TOKEN environment variable")
     if not NOTION_DATA_SOURCE_ID:
@@ -964,10 +982,10 @@ def sync_to_notion(open_offers):
         f"sync start: {len(open_offers)} offer(s), "
         f"NOTION_DATA_SOURCE_ID={short_id(NOTION_DATA_SOURCE_ID)}"
     )
-    notion_data_source_id = resolve_data_source_id(NOTION_DATA_SOURCE_ID, "Notion internships")
-    notion_schema = fetch_data_source_schema(notion_data_source_id)
-
-    existing_offers = fetch_existing_offers(notion_data_source_id)
+    context = context or prepare_notion_sync()
+    notion_data_source_id = context['data_source_id']
+    notion_schema = context['schema']
+    existing_offers = context['existing_offers']
     todo_target = None
     if os.getenv('LEGACY_TODO_ENABLED', 'false').lower() == 'true':
         if not TODO_DATA_SOURCE_ID:
