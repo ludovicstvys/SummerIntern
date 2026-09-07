@@ -1,4 +1,4 @@
-{% extends "base.html" %}{% block content %}<section class="narrow"><div class="eyebrow">Alert design</div><h1>Choose what earns<br>your attention.</h1><p class="lede">We will show you the current matches before anything goes live.</p>
+{% extends "base.html" %}{% block content %}<section class="narrow"><div class="eyebrow">Alert settings</div><h1>Choose what earns<br>your attention.</h1><p class="lede">Set your filters, review the matches, then activate alerts when everything looks right.</p>
 {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
 <form class="settings" action="/preferences/preview" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 <fieldset><legend>Programme type</legend><p>Select one or both recruiting cycles.</p><div class="choice-grid">{% for item in all_types %}<label class="choice"><input type="checkbox" name="program_types" value="{{ item }}" {% if item in program_types %}checked{% endif %}><span>{{ item|title }}</span></label>{% endfor %}</div></fieldset>

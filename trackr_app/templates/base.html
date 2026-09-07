@@ -7,7 +7,7 @@
 </head>
 <body>
   <header class="site-header"><a class="brand" href="/dashboard"><span>TA</span> Trackr Alerts</a>
-    {% if user %}<nav><a href="/dashboard">Opportunities</a><a href="/preferences">Preferences</a>{% if user.role == 'admin' %}<a href="/admin">People</a>{% endif %}<form action="/logout" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button">Sign out</button></form></nav>{% endif %}
+    {% if user %}<nav><a href="/dashboard" {% if request.url.path == '/dashboard' %}aria-current="page"{% endif %}>Opportunities</a><a href="/preferences" {% if request.url.path == '/preferences' %}aria-current="page"{% endif %}>Preferences</a>{% if user.role == 'admin' %}<a href="/admin" {% if request.url.path == '/admin' %}aria-current="page"{% endif %}>People</a>{% endif %}<form action="/logout" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button">Sign out</button></form></nav>{% endif %}
   </header>
   <main>{% if request.query_params.get("message") %}<p role="status">{{ request.query_params.get("message") }}</p>{% endif %}{% block content %}{% endblock %}</main>
 </body>
