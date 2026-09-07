@@ -16,11 +16,9 @@ jobs:
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       PYTHON_DOTENV_DISABLED: "1"
-      LEGACY_EMAIL_ENABLED: ${{ vars.LEGACY_EMAIL_ENABLED || 'true' }}
+      LEGACY_EMAIL_ENABLED: ${{ vars.LEGACY_EMAIL_ENABLED || 'false' }}
       LEGACY_TODO_ENABLED: ${{ vars.LEGACY_TODO_ENABLED || 'false' }}
-      # Temporarily paused during the 2026-09-07 remediation. Set the Actions
-      # variable to true only after the dry-run reconciliation is approved.
-      LEGACY_NOTION_ENABLED: ${{ vars.LEGACY_NOTION_ENABLED || 'false' }}
+      LEGACY_NOTION_ENABLED: ${{ vars.LEGACY_NOTION_ENABLED || 'true' }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

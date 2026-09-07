@@ -113,6 +113,29 @@ def run_collector(params, output_file, label, start_term=None):
 
 
 SUMMER_SNAPSHOT_FILES = ('processus_ouverts.csv', 'processus_ouverts_fr_summer.csv', 'processus_ouverts_hk_summer.csv')
+LAST_EMAIL_SNAPSHOT_FILES = (
+    'processus_ouverts.csv', 'processus_ouverts_fr_off_cycle.csv',
+    'processus_ouverts_uk_off_cycle.csv',
+)
+LAST_EMAIL_OFFERS = {
+    ('Private Equity - Infrastructure - Internship', 'InfraVia Capital Partners', 'France'),
+    ('2027 Sales & Trading Off-Cycle Internship', 'Morgan Stanley', 'France'),
+    ('Global Banking and Advisory 2027 Summer Internship Programme', 'Société Générale', 'UK'),
+    ('2027 Internal Audit Summer Analyst Programme', 'Morgan Stanley', 'UK'),
+    ('2027 Sales & Trading Summer Analyst Programme', 'Morgan Stanley', 'UK'),
+    ('2027 Global Investment Banking - M&A Summer Internship', 'Baird', 'UK'),
+    ('2027 Global Capital Markets Summer Analyst Programme', 'Morgan Stanley', 'UK'),
+    ('2027 Summer Analyst Programme: Japanese Corporate Banking', 'MUFG', 'UK'),
+    ('2027 Investment Banking Summer Analyst Programme', 'Morgan Stanley', 'UK'),
+    ('Global Markets 2027 Summer Internship Programme', 'Société Générale', 'UK'),
+    ('2027 Summer Internship Program', 'Brevan Howard', 'UK'),
+    ('2027 Summer Analyst Programme: Internal Audit', 'MUFG', 'UK'),
+    ('2027 Summer Analyst Programme: Capital Markets', 'MUFG', 'UK'),
+    ('Investments Summer Analyst Internship 2027', 'InfraRed Capital Partners', 'UK'),
+    ('2027 Summer Analyst Programme: Global Corporate Investment Banking', 'MUFG', 'UK'),
+    ('2027 Investment Banking Off-Cycle Internship', 'Morgan Stanley', 'UK'),
+    ('2027 Global Capital Markets Off-Cycle Internship', 'Morgan Stanley', 'UK'),
+}
 
 
 def _offer_value(offer, lower, csv):
@@ -169,6 +192,27 @@ def reconcile_summer_snapshot(adapter, snapshot_dir='.', apply=False):
         else:
             missing.append(offer)
     result = {'snapshot_files': list(SUMMER_SNAPSHOT_FILES), 'candidates': len(candidates), 'missing': len(missing), 'ambiguous': ambiguous, 'created': 0}
+    if apply and missing:
+        adapter.sync_to_notion(missing, context=context)
+        result['created'] = len(missing)
+    return result
+
+
+def sync_last_email_offers(adapter, snapshot_dir='.', apply=False):
+    """Sync precisely the 17 opportunities listed in the 7 September email."""
+    context = adapter.prepare_notion_sync()
+    selected = []
+    for filename in LAST_EMAIL_SNAPSHOT_FILES:
+        for row in adapter.read_process_csv(Path(snapshot_dir) / filename):
+            offer = _csv_offer(row)
+            signature = (offer['name'], offer['company'], offer['region'])
+            if signature in LAST_EMAIL_OFFERS:
+                selected.append(offer)
+    selected_by_url = {canonical_offer_url(offer['offer_url']): offer for offer in selected}
+    if len(selected_by_url) != len(LAST_EMAIL_OFFERS):
+        raise RuntimeError(f'Last-email snapshot mismatch: found {len(selected_by_url)} of {len(LAST_EMAIL_OFFERS)} offers')
+    missing = [offer for url, offer in selected_by_url.items() if url not in context['existing_offers']]
+    result = {'mail_offers': len(selected_by_url), 'already_in_notion': len(selected_by_url) - len(missing), 'missing': len(missing), 'created': 0}
     if apply and missing:
         adapter.sync_to_notion(missing, context=context)
         result['created'] = len(missing)
