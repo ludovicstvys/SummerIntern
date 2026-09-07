@@ -13,6 +13,30 @@ TRACKERS = [
     {'region': region, 'industry': 'Finance', 'season': settings.season, 'type': kind}
     for region in ('France', 'UK', 'Hong Kong')
     for kind in ('summer-internships', 'off-cycle-internships')
+] + [
+    {
+        'region': 'UK',
+        'season': settings.season,
+        'type': 'spring-weeks',
+        'source_type': 'spring-weeks',
+        'endpoint': 'https://api.the-trackr.com/spring-weeks',
+        'page_url': 'https://app.the-trackr.com/uk-finance/spring-weeks',
+    },
+    *[
+        {
+            'region': region,
+            'industry': 'Finance',
+            'season': settings.season,
+            'type': kind,
+            'page_url': f"https://app.the-trackr.com/{region_slug}-finance/{kind}",
+        }
+        for region, region_slug, kind in (
+            ('UK', 'uk', 'industrial-placements'),
+            ('UK', 'uk', 'graduate-programmes'),
+            ('UK', 'uk', 'events'),
+            ('France', 'france', 'graduate-programmes'),
+        )
+    ],
 ]
 
 
@@ -38,7 +62,11 @@ def scrape_all(db: Session) -> dict[str, int]:
                 if not item.get('name') or not canonical_offer_url(item.get('offer_url')):
                     raise ValueError('Incomplete offer')
                 _date(item.get('opening_date')); _date(item.get('closing_date'))
-            kind = 'summer' if params['type'] == 'summer-internships' else 'off-cycle'
+            kind = params['type']
+            if kind == 'summer-internships':
+                kind = 'summer'
+            elif kind == 'off-cycle-internships':
+                kind = 'off-cycle'
             season = params.get('season', settings.season)
             tracker_seen = set()
             # Backfill fixtures/local databases created before the migration.

@@ -10,7 +10,14 @@ from .models import Delivery, NotionSync, Offer, Preference, User, UserOffer, ut
 from .config import settings
 from trackr_common import dates_are_open
 
-PROGRAM_TYPES = ("summer", "off-cycle")
+PROGRAM_TYPES = (
+    "summer",
+    "off-cycle",
+    "spring-weeks",
+    "industrial-placements",
+    "graduate-programmes",
+    "events",
+)
 REGIONS = ("France", "UK", "Hong Kong")
 
 

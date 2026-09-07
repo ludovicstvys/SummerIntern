@@ -9,6 +9,7 @@ import requests
 
 
 TRACKR_API_URL = "https://api.the-trackr.com/programmes"
+TRACKR_SPRING_WEEKS_URL = "https://api.the-trackr.com/spring-weeks"
 
 
 class OfferSnapshot(list):
@@ -65,10 +66,61 @@ def extract_trackr_items(data):
     return []
 
 
+def _trackr_source_url(params):
+    return params.get("endpoint", TRACKR_API_URL)
+
+
+def _spring_week_is_closed(item):
+    status = str(item.get("status") or item.get("applicationStatus") or "").strip().lower()
+    if status in {"closed", "expired", "filled", "unavailable", "past"}:
+        return True
+    if item.get("closed") is True or item.get("isClosed") is True or item.get("isOpen") is False:
+        return True
+    closing_date = iso_to_date(item.get("closingDate") or item.get("deadline"))
+    return closing_date is not None and not dates_are_open(None, closing_date)
+
+
+def _spring_week_offers(items, page_url, region):
+    offers = OfferSnapshot()
+    for item in items:
+        if not isinstance(item, dict) or not item.get("id") or not item.get("name"):
+            raise RuntimeError("Trackr returned malformed spring week metadata")
+        if _spring_week_is_closed(item):
+            continue
+        offers.append(
+            {
+                "name": item["name"].strip(),
+                "company": item.get("companyName") or "",
+                "company_id": item.get("companyId"),
+                "offer_url": f"{page_url}#{item['id']}",
+                "region": region,
+                "categories": [item["week"]] if item.get("week") else [],
+                "opening_date": None,
+                "closing_date": None,
+                "stage": "Spring week",
+                "rolling": False,
+                "needs_cv": False,
+                "needs_cover_letter": False,
+                "company_description": None,
+                "notes": item.get("dates"),
+            }
+        )
+    return offers
+
+
 def scrape_open_programmes(params):
-    response = requests.get(TRACKR_API_URL, params=params, timeout=30)
+    query = params.get("query") or {
+        key: value
+        for key, value in params.items()
+        if key not in {"endpoint", "source_type", "page_url", "query"}
+    }
+    response = requests.get(_trackr_source_url(params), params=query, timeout=30)
     response.raise_for_status()
     payload = response.json()
+    if params.get("source_type") == "spring-weeks":
+        if not isinstance(payload, list):
+            raise RuntimeError("Trackr returned malformed spring week response")
+        return _spring_week_offers(payload, params["page_url"], params["region"])
     internships = extract_trackr_items(payload)
     # A paginated or explicitly partial response is not a complete snapshot.
     if isinstance(payload, dict):

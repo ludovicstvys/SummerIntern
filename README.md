@@ -40,6 +40,8 @@ python -m trackr_app.cli check-operations
 
 Workers use database locks, delay retries and bound their processing time. SMTP remains **at-least-once**: a crash after provider acceptance but before the database commit can cause a duplicate. A stable Message-ID is not a provider deduplication guarantee. Daily digests are sent at most once per local date; a partial SMTP failure does not consume that date.
 
+The scraper monitors the six regional Finance feeds plus these Trackr pages: UK Spring Weeks, UK Industrial Placements, UK Graduate Programmes, UK Events, and France Graduate Programmes. Spring Weeks are read from Trackr's dedicated `/spring-weeks` API and linked back to the page with a stable item anchor; the other pages use the `/programmes` API with their page type. These source types are available in preferences as `spring-weeks`, `industrial-placements`, `graduate-programmes`, and `events`.
+
 `/health` checks database/schema and commit for deployment readiness. `/admin/operations` is administrator-only and reports stale workers (30 minutes), failed tasks and immediate notifications delayed over one hour. `check-operations` exposes the same result to the scheduler and returns nonzero when degraded. Sources are monitored independently. Daily digests waiting for their scheduled hour are not flagged as delayed immediate mail.
 
 Failed jobs can be replayed individually, without editing SQL:
