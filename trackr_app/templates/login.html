@@ -1,3 +1,24 @@
 {% extends "base.html" %}{% block title %}Sign in · Trackr Alerts{% endblock %}
-{% block content %}<section class="auth-shell"><div class="eyebrow">Private opportunity intelligence</div><h1>Stay early.<br>Apply deliberately.</h1><p class="lede">A focused feed of finance internships, matched to where and when you want to work.</p>
-<form class="panel auth-panel" action="/auth/request" method="post"><label>Email address<input type="email" name="email" required autofocus placeholder="you@example.com"></label><button class="primary">Email me a sign-in link</button>{% if message %}<p class="notice">{{ message }}</p>{% endif %}<small>Access is invitation-only. Links expire after 15 minutes.</small></form></section>{% endblock %}
+{% block content %}
+<section class="auth-shell">
+  <div class="eyebrow">Private opportunity intelligence</div><h1>Welcome back.</h1>
+  <p class="lede">Sign in to your finance internship feed.</p>
+  <form class="panel auth-panel" action="/auth/login" method="post">
+    <input type="hidden" name="form_token" value="{{ form_token }}">
+    <label>Email address<input type="email" name="email" required autofocus autocomplete="username" maxlength="320" placeholder="you@example.com"></label>
+    <label>Password<input type="password" name="password" required autocomplete="current-password" maxlength="128"></label>
+    <button class="primary">Sign in</button>
+    <small>Stay signed in for 90 days, renewed when you return, for up to one year.</small>
+    <p><a href="/auth/password/request">Forgot password?</a> · <a href="/auth/password/request">Set your first password</a></p>
+  </form>
+  <details class="panel auth-panel">
+    <summary>Sign in with an email link instead</summary>
+    <form action="/auth/request" method="post">
+      <input type="hidden" name="form_token" value="{{ form_token }}">
+      <label>Email address<input type="email" name="email" required autocomplete="email" maxlength="320"></label>
+      <button class="primary">Email me a sign-in link</button>
+      <small>Access is invitation-only. Links expire after 15 minutes.</small>
+    </form>
+  </details>
+</section>
+{% endblock %}

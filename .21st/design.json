@@ -31,7 +31,7 @@
     "avoid": []
   },
   "decisions": [
-    "Use a warm editorial job-intelligence aesthetic with serif display type, restrained orange accents, flat bordered surfaces, and high-density opportunity rows."
+    "Preserve the existing green palette, serif headings and project tokens. Opportunities use a single column of expandable cards, compact navigation and server-rendered search and filters."
   ],
   "evidence": [],
   "generatedAt": "2026-09-04T15:58:58.768Z"

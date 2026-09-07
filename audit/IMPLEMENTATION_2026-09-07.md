@@ -66,3 +66,15 @@ Avant déploiement :
 4. Déployer la migration et le code via le workflow, puis effectuer une recette avec une adresse et un espace Notion de test autorisés et contrôler les Actions planifiées.
 
 Aucun mail réel envoyé, aucune écriture Notion ou modification de production effectuée pendant cette implémentation. Aucun commit ou déploiement créé.
+
+## Ajout — connexion par mot de passe et sessions persistantes
+
+- `/login` propose la connexion e-mail/mot de passe, la définition initiale et la récupération. Les invitations et liens de connexion existants restent disponibles ; les comptes sans mot de passe sont invités à en définir un après connexion par lien.
+- Mots de passe de 12 à 128 caractères hachés avec Argon2 (`pwdlib[argon2]==0.3.0`). Les liens de définition/récupération expirent après 15 minutes ; leur ouverture ne les consomme pas. La validation du formulaire consomme le jeton atomiquement, révoque les autres sessions et liens, puis ouvre une nouvelle session.
+- Sessions persistantes de 90 jours, renouvelées au maximum une fois par jour d'activité authentifiée, avec plafond de 365 jours depuis leur création. Validation et cookies sont centralisés ; aucune session expirée ou révoquée n'est réactivée. La déconnexion supprime immédiatement la session courante.
+- Protection CSRF des formulaires publics, vérification de l'origine lorsqu'elle est fournie, réponses génériques, quotas distincts pour les connexions par mot de passe et les envois d'e-mails. Les réponses privées ne sont pas mises en cache.
+- Migration `20260907_0005` : `users.password_hash`, `user_sessions.renewed_at` et table `password_tokens`. Les comptes et sessions existants sont conservés. La désactivation et la récupération administrateur révoquent également les jetons de récupération.
+
+Validation : **136 tests réussis, aucun ignoré**, avec `scripts/test_postgres_local.py` sur un cluster PostgreSQL temporaire et isolé. Les contrôles incluent migrations SQLite/PostgreSQL et absence de dérive Alembic, accès des comptes existants, limites de mots de passe, erreurs/CSRF/quotas, récupération concurrente, renouvellement concurrent, expiration et révocation. Compilation Python, cohérence des dépendances et `git diff --check` validés. Les 35 avertissements sont des dépréciations des bibliothèques sous Python 3.14.
+
+Les modifications locales préexistantes sont conservées. Aucun déploiement ni migration de production n'a été effectué. À la prochaine livraison, installer les dépendances et appliquer `alembic upgrade head` avant de servir la nouvelle version ; SQLite applique également ses migrations au démarrage local. SMTP reste nécessaire pour les invitations et la récupération, mais pas pour les connexions par mot de passe.

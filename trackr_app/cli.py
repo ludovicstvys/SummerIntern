@@ -10,6 +10,7 @@ from .models import Delivery, NotionSync, Invitation, User, Preference, LegacyTa
 from .config import settings
 from .invitations import process_invitations
 from .operations import lock_state, insert_for
+from .sessions import revoke_user_auth
 from .preferences import activate_preference
 from .scraper import scrape_all
 from .workers import process_digests, process_immediate_alerts, sync_notion
@@ -53,8 +54,7 @@ def maintenance(args):
             user = db.scalar(select(User).where(User.email == email).with_for_update())
             user.role, user.is_active = 'admin', True
             db.execute(insert_for(db, Preference).values(user_id=user.id).on_conflict_do_nothing(index_elements=['user_id']))
-            db.execute(delete(UserSession).where(UserSession.user_id == user.id))
-            db.execute(delete(MagicLink).where(MagicLink.user_id == user.id))
+            revoke_user_auth(db, user.id)
             db.commit()
             print(json.dumps({'promoted_user_id': user.id, 'sessions_revoked': True}))
         elif args.command == 'retry-failed':

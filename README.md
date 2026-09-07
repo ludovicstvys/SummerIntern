@@ -15,9 +15,19 @@ uvicorn trackr_app.main:app --reload
 
 Set `ADMIN_EMAIL` to bootstrap a new administrator, then request a link from `/login`. SMTP is required to receive sign-in links; logs never contain these links. Gmail application-password separators are removed automatically. Other SMTP passwords are preserved.
 
-SQLite startup migrates recognized old local databases through Alembic. Back up an existing database first. Production PostgreSQL migrations are run only by deployment, never by web startup. The current revision is `20260907_0004`.
+SQLite startup migrates recognized old local databases through Alembic. Back up an existing database first. Production PostgreSQL migrations are run only by deployment, never by web startup. The current revision is `20260907_0005`.
 
 ## Accounts and delivery
+
+Sign in at `/login` with your invited email address and password. Existing accounts can select **Set your first password**, or follow an invitation/sign-in link and choose a password after signing in. Email links remain available as an alternative. **Forgot password?** uses the same recovery flow: a 15-minute, single-use link opens a form without consuming the token until the password is saved. No public registration is enabled.
+
+Passwords accept 12–128 characters and are hashed with Argon2 using `pwdlib[argon2]`. Saving a first or replacement password revokes all previous sessions, sign-in links and recovery links, then signs in the current browser. Account deactivation and administrator recovery also revoke recovery links. Recovery email requires the existing SMTP configuration; ordinary password sign-in does not require SMTP.
+
+Sessions persist across browser restarts for 90 days. Authenticated activity renews the database expiry and cookie at most once per day, capped at 365 days from the original sign-in. Existing unexpired sessions are preserved and use their original creation date for that cap. Signing out revokes the current session immediately. Cookies use `HttpOnly`, `SameSite=Lax`, and `Secure` when `APP_URL` uses HTTPS; set `APP_URL` to the application's canonical browser origin for form-origin checks. Private/authentication responses disable caching.
+
+Public authentication forms require a signed CSRF cookie and matching form token. Password sign-in allows 10 attempts per email and 50 per IP per 15 minutes. Email-link requests share a separate budget of one per email per minute, five per email and 20 per IP per 15 minutes. Error and email-request responses do not reveal whether an account exists.
+
+New endpoints: `POST /auth/login`, `GET/POST /auth/password/request`, `GET/POST /auth/password/reset/{token}`, and `GET/POST /auth/password` (first password for an authenticated account). Existing magic-link routes remain available; `POST /auth/request` now also requires the form's `form_token`.
 
 Invitations persist before email delivery. Failed invitations retry with a fresh 15-minute link, exponential delay and a five-attempt limit. Their status is visible in `/admin`; inviting again retries a failed invitation. Repeated successful invitations within one minute are suppressed. Login responses remain generic.
 
@@ -25,7 +35,7 @@ Activation records existing matches as a baseline without bulk email. New matchi
 
 Openings in the future and past closing dates are excluded, including rolling offers with an explicit past closing date. Missing dates do not imply closure. The last source must disappear from two complete snapshots before closing an offer. An ambiguous empty response remains an error; a structured response explicitly declaring zero results is accepted. A failed source never erases the previous snapshot.
 
-The dashboard defaults to currently relevant open matches. History and pagination remain available.
+The dashboard defaults to currently relevant open matches. Expandable cards show dates by source, supplied application requirements, company descriptions and notes. Search by company or role, filter by location/programme/start period, or sort by the next closing date. Browse filters never change alert preferences. History includes prior matches and closed roles; pagination shows 20 results per page and preserves the selected filters.
 
 ## Workers and operations
 

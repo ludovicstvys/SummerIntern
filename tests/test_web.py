@@ -1,3 +1,5 @@
+from tests.auth_helpers import auth_form
+
 import unittest
 from datetime import timedelta
 from unittest.mock import patch
@@ -34,7 +36,7 @@ class WebAuthTests(unittest.TestCase):
 
     @patch("trackr_app.main.send_magic_link")
     def test_unknown_email_is_not_enumerated(self, send):
-        response = self.client.post("/auth/request", data={"email": "unknown@example.com"}, follow_redirects=False)
+        response = self.client.post("/auth/request", data=auth_form(self.client, email="unknown@example.com"), follow_redirects=False)
         self.assertEqual(response.status_code, 303)
         self.assertIn("If%20the%20address%20is%20invited", response.headers["location"])
         send.assert_not_called()
@@ -62,5 +64,5 @@ class WebAuthTests(unittest.TestCase):
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["database"], "ok")
-        self.assertEqual(response.json()["schema"], "20260907_0004")
+        self.assertEqual(response.json()["schema"], "20260907_0005")
         self.assertIn("commit", response.json())

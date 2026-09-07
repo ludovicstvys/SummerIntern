@@ -11,3 +11,8 @@ trackr.db
 # Private recipient list and local database backups
 email.csv
 .trackr-backups/
+
+# Downloaded security tooling and isolated Strix audit workspaces
+/tools/strix/
+/audit/strix-work/
+/strix_runs/

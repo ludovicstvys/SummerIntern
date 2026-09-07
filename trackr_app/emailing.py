@@ -80,6 +80,20 @@ def send_email(to: str, subject: str, html: str, idempotency_key: str) -> str:
     return message_id
 
 
+def send_password_link(to: str, url: str) -> str:
+    return send_email(
+        to, 'Set or reset your Trackr Alerts password',
+        f'''<!doctype html><html lang="en"><body style="font-family:Arial,sans-serif;color:#17352b;">
+        <h1>Choose your password</h1>
+        <p>Use this link to set your first password or reset your existing password.</p>
+        <p><a href="{escape(url, quote=True)}">Choose a password</a></p>
+        <p>This link expires in 15 minutes and can only be used once. Saving your password signs out your other sessions.</p>
+        <p>If you did not request this email, you can ignore it. Your password has not changed.</p>
+        </body></html>''',
+        f'password-{to}-{url.rsplit("/", 1)[-1]}',
+    )
+
+
 def send_magic_link(to: str, url: str) -> str:
     return send_email(
         to,

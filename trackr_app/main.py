@@ -1,7 +1,6 @@
 import json
 import os
 from datetime import time
-from ipaddress import ip_address
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from urllib.parse import quote
@@ -23,10 +22,13 @@ from .emailing import send_magic_link
 from .models import Delivery, Invitation, MagicLink, NotionSync, Offer, OfferSource, Preference, User, UserOffer, UserSession, WorkerState, utcnow
 from .notion import accessible_pages, create_offer_database, exchange_code, oauth_url, save_connection, recover_database
 from .preferences import PROGRAM_TYPES, REGIONS, activate_preference, matching_offers, offer_matches, offer_is_open
+from .opportunities import browse_opportunities, opportunity_card, relevant_sources
 from .operations import insert_for, error_code
 from .invitations import deliver_invitation
 from .security import expires_in, new_token, token_hash
 from .limits import allow_login
+from .auth import router as auth_router, auth_page, check_form, client_ip
+from .sessions import current_user, create_session, set_session_cookie, session_headers, valid_session, revoke_user_auth
 from .health import SCHEMA_REVISION
 
 PACKAGE_DIR = __import__("pathlib").Path(__file__).resolve().parent
@@ -54,20 +56,11 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Trackr Alerts", lifespan=lifespan)
+app.include_router(auth_router)
+app.middleware("http")(session_headers)
 app.mount("/static", StaticFiles(directory=PACKAGE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
 signer = URLSafeTimedSerializer(settings.secret_key, salt="notion-oauth")
-
-
-def current_user(request: Request, db: Session) -> User | None:
-    raw = request.cookies.get("trackr_session")
-    if not raw:
-        return None
-    session = db.scalar(select(UserSession).where(UserSession.token_hash == token_hash(raw)))
-    if not session or session.expires_at.replace(tzinfo=session.expires_at.tzinfo or utcnow().tzinfo) <= utcnow():
-        return None
-    user = db.get(User, session.user_id)
-    return user if user and user.is_active else None
 
 
 def require_user(request: Request, db: Session = Depends(get_db)) -> User:
@@ -84,8 +77,7 @@ def require_admin(user: User = Depends(require_user)) -> User:
 
 
 def csrf(request: Request, db: Session, value: str) -> None:
-    raw = request.cookies.get("trackr_session", "")
-    session = db.scalar(select(UserSession).where(UserSession.token_hash == token_hash(raw)))
+    session = valid_session(request, db)
     if not session or not value or value != session.csrf_token:
         raise HTTPException(403, "Invalid CSRF token")
 
@@ -117,23 +109,19 @@ def home(request: Request, db: Session = Depends(get_db)):
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request, db: Session = Depends(get_db)):
-    return templates.TemplateResponse(request, "login.html", context(request, db, message=request.query_params.get("message")))
+    if current_user(request, db):
+        return RedirectResponse("/dashboard", 303)
+    return auth_page(request, "login.html")
 
 
 @app.post("/auth/request")
-def request_link(request: Request, email: str = Form(...), db: Session = Depends(get_db)):
+def request_link(request: Request, email: str = Form(...), form_token: str = Form(""), db: Session = Depends(get_db)):
+    check_form(request, form_token)
     normalized = email.strip().lower()[:320]
-    # Only trust Vercel's overwritten proxy header inside Vercel.
-    ip = request.client.host if request.client else "unknown"
-    if os.getenv("VERCEL") == "1":
-        candidate = request.headers.get("x-vercel-forwarded-for", ip).split(",")[0].strip()
-        try:
-            ip = str(ip_address(candidate))
-        except ValueError:
-            pass
+    ip = client_ip(request)
     if not allow_login(db, normalized, ip):
         return RedirectResponse("/login?message=" + quote("If the address is invited, a sign-in link is on its way."), 303)
-    user = db.scalar(select(User).where(User.email == normalized, User.is_active.is_(True)))
+    user = db.scalar(select(User).where(User.email == normalized, User.is_active.is_(True)).with_for_update())
     if user:
         raw = new_token()
         db.add(MagicLink(user_id=user.id, token_hash=token_hash(raw), expires_at=expires_in(15)))
@@ -158,14 +146,13 @@ def consume_link(raw: str, db: Session = Depends(get_db)):
     if consumed.rowcount != 1:
         db.rollback()
         return RedirectResponse("/login?message=" + quote("This link is invalid or has expired."), 303)
-    session_raw = new_token()
-    db.add(UserSession(user_id=link.user_id, token_hash=token_hash(session_raw), csrf_token=new_token(), expires_at=expires_in(60 * 24 * 30)))
+    cookie = create_session(db, link.user_id)
     invitation = db.scalar(select(Invitation).where(Invitation.email == db.get(User, link.user_id).email, Invitation.accepted_at.is_(None)))
     if invitation:
         invitation.accepted_at = utcnow()
     db.commit()
-    response = RedirectResponse("/dashboard", 303)
-    response.set_cookie("trackr_session", session_raw, httponly=True, secure=settings.app_url.startswith("https"), samesite="lax", max_age=60 * 60 * 24 * 30)
+    response = RedirectResponse("/auth/password" if not link_user.password_hash else "/dashboard", 303)
+    set_session_cookie(response, *cookie)
     return response
 
 
@@ -183,14 +170,14 @@ def logout(request: Request, csrf_token: str = Form(...), db: Session = Depends(
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
-def dashboard(request: Request, page: int = 1, history: bool = False, user: User = Depends(require_user), db: Session = Depends(get_db)):
+def dashboard(request: Request, page: int = 1, history: bool = False, q: str = "", region: str = "", programme: str = "", start_term: str = "", sort: str = "latest", user: User = Depends(require_user), db: Session = Depends(get_db)):
     preference = user.preference or Preference(user_id=user.id)
     if not user.preference:
         db.add(preference); db.commit(); db.refresh(preference)
     rows = db.execute(select(UserOffer, Offer).join(Offer, UserOffer.offer_id == Offer.id).where(UserOffer.user_id == user.id).order_by(UserOffer.matched_at.desc(), UserOffer.id.desc())).all()
     offers = [row[1] for row in rows if history or (offer_is_open(row[1]) and offer_matches(row[1], preference))]
-    page = max(1, min(page, max(1, (len(offers) + 49) // 50)))
-    return templates.TemplateResponse(request, "dashboard.html", context(request, db, user, preference=preference, offers=offers[(page-1)*50:page*50], page=page, has_next=len(offers)>page*50, history=history, offer_is_open=offer_is_open))
+    feed = browse_opportunities(offers, preference, page=page, history=history, q=q, region=region, programme=programme, start_term=start_term, sort=sort)
+    return templates.TemplateResponse(request, "dashboard.html", context(request, db, user, preference=preference, **feed))
 
 
 @app.get("/preferences", response_class=HTMLResponse)
@@ -226,7 +213,9 @@ def preferences_preview(request: Request, program_types: list[str] = Form(defaul
     except ValueError as exc:
         return preference_error(request, db, user, str(exc))
     pref = Preference(user_id=user.id, **values)
-    return templates.TemplateResponse(request, "preview.html", context(request, db, user, preference=pref, offers=matching_offers(db, pref), program_types=json.loads(pref.program_types), regions=json.loads(pref.regions), start_terms=json.loads(pref.start_terms)))
+    offers = matching_offers(db, pref)
+    cards = [opportunity_card(offer, relevant_sources(offer, pref)) for offer in offers[:20]]
+    return templates.TemplateResponse(request, "preview.html", context(request, db, user, preference=pref, offers=offers, cards=cards, program_types=json.loads(pref.program_types), regions=json.loads(pref.regions), start_terms=json.loads(pref.start_terms)))
 
 
 @app.post("/preferences/activate")
@@ -302,8 +291,7 @@ def toggle_user(user_id: int, request: Request, csrf_token: str = Form(...), adm
     target.is_active = not target.is_active
     if not target.is_active:
         db.execute(update(Invitation).where(Invitation.email == target.email, Invitation.accepted_at.is_(None)).values(delivery_status='cancelled'))
-        db.execute(delete(UserSession).where(UserSession.user_id == target.id))
-        db.execute(delete(MagicLink).where(MagicLink.user_id == target.id))
+        revoke_user_auth(db, target.id)
         db.execute(update(Delivery).where(Delivery.user_id == target.id, Delivery.status.in_(["pending", "processing", "failed"])).values(status="cancelled", processing_started_at=None))
         if target.notion:
             db.execute(update(NotionSync).where(NotionSync.connection_id == target.notion.id, NotionSync.status.in_(["pending", "failed"])).values(status="cancelled"))

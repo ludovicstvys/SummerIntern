@@ -43,7 +43,7 @@ def pg():
 
 def test_postgres_migrations_match_models(pg):
     with pg.connect() as connection:
-        assert connection.scalar(text('select version_num from alembic_version')) == '20260907_0004'
+        assert connection.scalar(text('select version_num from alembic_version')) == '20260907_0005'
     with pg.begin() as connection:
         config = Config('alembic.ini'); config.attributes['connection'] = connection
         command.check(config)
@@ -180,3 +180,78 @@ def test_postgres_upgrade_preserves_existing_data_without_resending_invites(pg):
         source = db.query(OfferSource).one()
         assert source.offer_id == offer_id and source.region == 'France' and source.season == '2027'
         assert db.query(Invitation).one().delivery_status == 'sent'
+
+
+@pytest.mark.parametrize('second_token', ['first', 'second'])
+def test_postgres_concurrent_password_resets_have_one_winner(pg, second_token):
+    from fastapi.testclient import TestClient
+    from tests.auth_helpers import auth_form
+    from trackr_app.auth import passwords
+    from trackr_app.database import get_db
+    from trackr_app.main import app
+    from trackr_app.models import PasswordToken, UserSession
+    from trackr_app.security import token_hash, expires_in
+    Session = sessionmaker(bind=pg, expire_on_commit=False)
+    with Session() as db:
+        user = User(email='reset@example.com'); db.add(user); db.flush()
+        for raw in ('first', 'second'):
+            db.add(PasswordToken(user_id=user.id, token_hash=token_hash(raw), expires_at=expires_in(15)))
+        db.commit(); user_id = user.id
+    def dependency():
+        with Session() as db:
+            yield db
+    app.dependency_overrides[get_db] = dependency
+    entered, release = Event(), Event()
+    original_hash = passwords.hash
+    def slow_hash(password):
+        entered.set(); assert release.wait(10)
+        return original_hash(password)
+    # Do not enter TestClient lifespan: it bootstraps the application's real database.
+    def reset(raw):
+        client = TestClient(app)
+        try:
+            data = auth_form(client, password='new password phrase', confirmation='new password phrase')
+            return client.post('/auth/password/reset/' + raw, data=data, follow_redirects=False)
+        finally:
+            client.close()
+    try:
+        with patch.object(passwords, 'hash', side_effect=slow_hash), ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(reset, 'first')
+            try:
+                assert entered.wait(10)
+                second = pool.submit(reset, second_token)
+            finally:
+                release.set()
+            results = [first.result(timeout=10), second.result(timeout=10)]
+        assert sum(r.headers['location'] == '/dashboard' for r in results) == 1
+        with Session() as db:
+            assert db.query(UserSession).count() == 1
+            assert db.query(PasswordToken).count() == 0
+            assert passwords.verify('new password phrase', db.get(User, user_id).password_hash)
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_postgres_session_renewal_is_atomic(pg):
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from trackr_app.models import UserSession, utcnow
+    from trackr_app.security import token_hash
+    from trackr_app.sessions import current_user, aware
+    Session = sessionmaker(bind=pg, expire_on_commit=False)
+    now = utcnow()
+    with Session() as db:
+        user = User(email='session@example.com'); db.add(user); db.flush()
+        db.add(UserSession(user_id=user.id, token_hash=token_hash('persistent'), csrf_token='csrf',
+            created_at=now-timedelta(days=10), expires_at=now+timedelta(days=20)))
+        db.commit()
+    def renew(_):
+        request = SimpleNamespace(cookies={'trackr_session': 'persistent'}, state=SimpleNamespace())
+        with Session() as db:
+            assert current_user(request, db) is not None
+        return hasattr(request.state, 'session_cookie')
+    with patch('trackr_app.sessions.utcnow', return_value=now), ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(renew, range(8)))
+    assert sum(results) == 1
+    with Session() as db:
+        assert aware(db.query(UserSession).one().expires_at) == now+timedelta(days=90)

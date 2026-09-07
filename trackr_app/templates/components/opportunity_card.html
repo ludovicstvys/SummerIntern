@@ -1,0 +1,36 @@
+{% set offer = card.offer %}
+<article class="opportunity-card" aria-labelledby="opportunity-{{ offer.id }}">
+  <div class="opportunity-top">
+    <div class="opportunity-identity">
+      <span class="opportunity-monogram" aria-hidden="true">{{ (offer.company or '?')[:2]|upper }}</span>
+      <div><p class="opportunity-company">{{ offer.company or 'Company not specified' }}</p><h2 id="opportunity-{{ offer.id }}">{{ offer.name }}</h2></div>
+    </div>
+    {% if not card.open %}<span class="opportunity-badge closed">Closed</span>{% elif card.soon %}<span class="opportunity-badge soon">Closing soon</span>{% else %}<span class="opportunity-badge">Open</span>{% endif %}
+  </div>
+  <dl class="opportunity-facts">
+    <div><dt>Location</dt><dd>{{ card.regions|join(' / ') or 'Not specified' }}</dd></div>
+    <div><dt>Programme</dt><dd>{{ card.programmes|join(' / ') or 'Not specified' }}</dd></div>
+    <div><dt>Start period</dt><dd>{{ card.start_terms|join(' / ') or 'Not specified' }}</dd></div>
+    <div><dt>{{ 'Next deadline' if card.multiple_sources else 'Deadline' }}</dt><dd>{% if card.deadline %}<time datetime="{{ card.deadline }}">{{ card.deadline_label }}</time>{% elif not card.open %}Closed · see details{% elif offer.rolling %}Rolling recruitment{% else %}Not specified{% endif %}</dd></div>
+  </dl>
+  <div class="opportunity-footer"><p>{% if offer.rolling %}Applications reviewed on a rolling basis.{% elif card.multiple_sources %}Dates may vary by location and programme.{% else %}Check the listing for full application requirements.{% endif %}</p><a class="button secondary" href="{{ offer.offer_url }}" target="_blank" rel="noopener noreferrer" aria-label="View opportunity: {{ offer.name }} at {{ offer.company }} (opens in a new tab)">View opportunity ↗</a></div>
+  <details class="opportunity-details">
+    <summary><span class="details-show">Show details</span><span class="details-hide">Hide details</span><span class="details-symbol" aria-hidden="true">+</span></summary>
+    <div class="opportunity-detail-body">
+      <h3>Dates &amp; availability</h3>
+      <div class="opportunity-sources">{% for source in card.sources %}
+        <section class="opportunity-source" aria-label="{{ source.region }} · {{ source.programme }}">
+          <h4>{{ source.region }} · {{ source.programme }}{% if source.season %} <span class="muted">· {{ source.season }}</span>{% endif %}</h4>
+          <dl><div><dt>Opens</dt><dd>{{ source.opening }}</dd></div><div><dt>Closes</dt><dd>{{ source.closing }}</dd></div><div><dt>Starts</dt><dd>{{ source.start_term or 'Not specified' }}</dd></div><div><dt>Availability</dt><dd>{{ 'Open' if source.open else 'Not currently open' }}</dd></div></dl>
+        </section>
+      {% endfor %}</div>
+      <h3>Application information</h3>
+      {% if offer.stage and offer.stage|lower != 'unknown' %}<p><strong>Stage:</strong> {{ offer.stage }}</p>{% endif %}
+      {% if offer.rolling %}<p>Rolling recruitment. An explicit closing date still applies when provided.</p>{% endif %}
+      {% if offer.needs_cv or offer.needs_cover_letter %}<p><strong>Documents requested:</strong> {% if offer.needs_cv %}CV{% endif %}{% if offer.needs_cv and offer.needs_cover_letter %} and {% endif %}{% if offer.needs_cover_letter %}cover letter{% endif %}.</p>{% endif %}
+      <p class="muted">Only supplied information is shown. Check the external listing for complete requirements.</p>
+      {% if offer.company_description %}<h3>About the company</h3><p class="opportunity-prose">{{ offer.company_description }}</p>{% endif %}
+      {% if offer.notes %}<h3>Additional information</h3><p class="opportunity-prose">{{ offer.notes }}</p>{% endif %}
+    </div>
+  </details>
+</article>
