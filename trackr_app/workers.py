@@ -8,6 +8,9 @@ from .emailing import offer_email_html, send_email
 from .models import Delivery, Offer, Preference, User, utcnow
 from .notion import process_notion_queue
 from .preferences import digest_is_due, offer_matches
+from .preferences import offer_is_open
+from .operations import error_code, next_retry
+import time
 
 
 def _send_group(db: Session, user: User, deliveries: list[Delivery], label: str) -> bool:
@@ -21,7 +24,8 @@ def _send_group(db: Session, user: User, deliveries: list[Delivery], label: str)
     except Exception as exc:
         for item in deliveries:
             item.attempts += 1
-            item.last_error = type(exc).__name__
+            item.last_error = error_code(exc)
+            item.next_attempt_at = next_retry(item.attempts)
             item.status = "failed" if item.attempts >= 5 else "pending"
             item.processing_started_at = None
         return False
@@ -31,11 +35,12 @@ def _send_group(db: Session, user: User, deliveries: list[Delivery], label: str)
         item.sent_at = utcnow()
         item.processing_started_at = None
         item.last_error = None
+        item.next_attempt_at = None
     return True
 
 
 def _available():
-    return or_(Delivery.status == "pending", (Delivery.status == "processing") & (Delivery.processing_started_at < utcnow() - timedelta(minutes=15)))
+    return or_((Delivery.status == "pending") & or_(Delivery.next_attempt_at.is_(None), Delivery.next_attempt_at <= utcnow()), (Delivery.status == "processing") & or_(Delivery.processing_started_at.is_(None), Delivery.processing_started_at < utcnow() - timedelta(minutes=15)))
 
 
 def _claim(db: Session, deliveries: list[Delivery]) -> list[Delivery]:
@@ -56,7 +61,7 @@ def _eligible(db, user, preference, deliveries):
     eligible = []
     for delivery in deliveries:
         offer = db.get(Offer, delivery.offer_id, populate_existing=True)
-        if not user.is_active or not preference or preference.status != "active" or delivery.mode != preference.delivery_mode or not offer or not offer.is_open or not offer_matches(offer, preference):
+        if not user.is_active or not preference or preference.status != "active" or delivery.mode != preference.delivery_mode or not offer or not offer_is_open(offer) or not offer_matches(offer, preference):
             delivery.status = "cancelled"
             delivery.processing_started_at = None
         else:
@@ -66,10 +71,13 @@ def _eligible(db, user, preference, deliveries):
 
 
 def process_immediate_alerts(db: Session) -> int:
+    deadline = time.monotonic() + 90
     user_ids = db.scalars(select(Delivery.user_id).where(Delivery.mode == "immediate", Delivery.attempts < 5, _available()).distinct()).all()
     db.commit()
     sent = 0
     for user_id in user_ids:
+        if time.monotonic() >= deadline:
+            break
         user = _locked_user(db, user_id)
         if not user:
             db.rollback()
@@ -85,10 +93,13 @@ def process_immediate_alerts(db: Session) -> int:
 
 
 def process_digests(db: Session) -> int:
+    deadline = time.monotonic() + 90
     user_ids = db.scalars(select(Preference.user_id).where(Preference.status == "active", Preference.delivery_mode == "daily_digest")).all()
     db.commit()
     sent = 0
     for user_id in user_ids:
+        if time.monotonic() >= deadline:
+            break
         user = _locked_user(db, user_id)
         if not user:
             db.rollback()

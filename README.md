@@ -1,59 +1,108 @@
 # Trackr Alerts
 
-Private, invitation-only alerts for Trackr finance internships. Subscribers choose programme types, regions, off-cycle start terms, immediate or daily SMTP delivery, and can connect a personal Notion workspace.
+Private internship alerts with invitation-only accounts, programme/region/start-term preferences, immediate or daily email, and optional personal Notion synchronization.
 
 ## Local setup
 
-```bash
+```sh
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 cp .env.example .env
 alembic upgrade head
 uvicorn trackr_app.main:app --reload
 ```
 
-Set `ADMIN_EMAIL`; the account is created on application startup. Request its first magic link from `/login`. In local development, a failed SMTP delivery prints the link to the server log.
+Set `ADMIN_EMAIL` to bootstrap a new administrator, then request a link from `/login`. SMTP is required to receive sign-in links; logs never contain these links. Gmail application-password separators are removed automatically. Other SMTP passwords are preserved.
 
-Generate a valid encryption key with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+SQLite startup migrates recognized old local databases through Alembic. Back up an existing database first. Production PostgreSQL migrations are run only by deployment, never by web startup. The current revision is `20260907_0004`.
 
-## Background commands
+## Accounts and delivery
 
-```bash
+Invitations persist before email delivery. Failed invitations retry with a fresh 15-minute link, exponential delay and a five-attempt limit. Their status is visible in `/admin`; inviting again retries a failed invitation. Repeated successful invitations within one minute are suppressed. Login responses remain generic.
+
+Activation records existing matches as a baseline without bulk email. New matching offers and offers whose metadata becomes relevant are queued once per user. An offer can belong to several regions/programmes; source membership is tracked separately. Restoring filters or reactivating an account resumes matching unsent work. Already-sent offers and baseline offers are not emailed again on reopening. Draft accounts do not receive alerts.
+
+Openings in the future and past closing dates are excluded, including rolling offers with an explicit past closing date. Missing dates do not imply closure. The last source must disappear from two complete snapshots before closing an offer. An ambiguous empty response remains an error; a structured response explicitly declaring zero results is accepted. A failed source never erases the previous snapshot.
+
+The dashboard defaults to currently relevant open matches. History and pagination remain available.
+
+## Workers and operations
+
+```sh
 python -m trackr_app.cli scrape-all
+python -m trackr_app.cli process-invitations
 python -m trackr_app.cli process-immediate-alerts
 python -m trackr_app.cli process-digests
-python -m trackr_app.cli digest-worker
 python -m trackr_app.cli sync-notion
+python -m trackr_app.cli check-operations
 ```
 
-Production uses Vercel for FastAPI, Neon PostgreSQL for shared state, Gmail SMTP for delivery, and GitHub Actions for scheduled jobs. `platform-jobs.yml` runs collection, immediate alerts, delayed-safe daily digests, and Notion synchronization every five minutes. The legacy CSV/Notion workflow remains enabled independently.
+Workers use database locks, delay retries and bound their processing time. SMTP remains **at-least-once**: a crash after provider acceptance but before the database commit can cause a duplicate. A stable Message-ID is not a provider deduplication guarantee. Daily digests are sent at most once per local date; a partial SMTP failure does not consume that date.
 
-## Production bootstrap
+`/health` checks database/schema and commit for deployment readiness. `/admin/operations` is administrator-only and reports stale workers (30 minutes), failed tasks and immediate notifications delayed over one hour. `check-operations` exposes the same result to the scheduler and returns nonzero when degraded. Sources are monitored independently. Daily digests waiting for their scheduled hour are not flagged as delayed immediate mail.
 
-1. Create a Neon database through the Vercel integration and copy its pooled `DATABASE_URL`.
-2. Create the Vercel project `trackr-alerts`, linked to this repository, and keep its stable URL `https://trackr-alerts.vercel.app`.
-3. Add the web variables from `.env.example` to Vercel Production, setting `ENVIRONMENT=production` and `APP_URL=https://trackr-alerts.vercel.app`.
-4. Add `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`, `DATABASE_URL`, application secrets, SMTP values, and Notion OAuth values as GitHub Actions secrets.
-5. Configure the public Notion integration callback as `https://trackr-alerts.vercel.app/notion/callback`.
-6. Push to `main`; the production workflow tests, migrates Neon, deploys Vercel, and verifies `/health`.
+Failed jobs can be replayed individually, without editing SQL:
 
-Rotate `SECRET_KEY`, `ENCRYPTION_KEY`, SMTP app passwords, Notion credentials, database credentials, and the Vercel token immediately if any value is exposed. Never commit them.
+```sh
+python -m trackr_app.cli retry-failed --kind email --id 123
+python -m trackr_app.cli retry-failed --kind notion --id 456
+python -m trackr_app.cli retry-failed --kind invitation --id 789
+python -m trackr_app.cli retry-failed --kind legacy --id TASK_HASH
+```
 
-## Notion
+Only failed jobs can be reset. Workers still enforce account activity, preferences and open status. Logs retain exception type/provider status without credentials or email bodies.
 
-Create a public Notion integration whose OAuth redirect URI is `${APP_URL}/notion/callback`. Each subscriber authorizes pages, selects an accessible parent page, and the platform creates an `Internship Opportunities` database there.
+For explicit administrator recovery:
 
-## Reliability and operations
+```sh
+python -m trackr_app.cli promote-admin --email admin@example.com
+```
 
-Previewing preferences never changes active alerts. Activation reconciles unfinished deliveries and keeps already-sent history. Deactivation revokes sessions and cancels pending work. PostgreSQL user locks serialize delivery with preference changes and prevent overlapping digest sends. SMTP delivery is at-least-once: a crash after SMTP acceptance but before database commit can still cause a retry; a stable Message-ID is not a provider deduplication guarantee.
+This activates/promotes the selected account and revokes its sessions and links. Merely changing `ADMIN_EMAIL` never silently promotes an existing subscriber.
 
-Login requests are limited in the shared database (one request per email per minute bucket, five per 15-minute bucket, twenty per IP per 15-minute bucket). Only hashed identifiers are stored. Vercel's proxy header is trusted only inside Vercel.
+## Personal Notion
 
-An absent offer closes only after two successful complete snapshots; failed or ambiguous empty responses do not count. Unchanged offers do not reset Notion retries. Changing Notion destinations removes local sync references without deleting any remote database. Public Notion OAuth is optional for web startup; configure both client credentials to enable it.
+Personal synchronization is **paused by default**. Set `NOTION_SYNC_ENABLED=true` together with both OAuth credentials in web and workers to enable it. The dashboard accurately shows availability; the scheduler calls the command, which exits without external requests when disabled.
 
-`/health` checks database access and the production schema revision, and reports `APP_COMMIT` (or Vercel's commit SHA). Worker commands report completed, deferred and failed tasks, and return nonzero on processing errors. Failed deliveries remain inspectable in the database.
+Create a public integration with callback `${APP_URL}/notion/callback`. Connect an account, choose a shared parent page and create its opportunities database. Repeated setup submissions reuse the existing destination. An uncertain creation is not repeated automatically: the setup page lets the user attach the database already created, after access, parent and schema verification. Disconnecting keeps the remote database. Reconnecting the same workspace retries failed syncs; a changed workspace resets local destination references.
 
-The production workflow owns deployment; Vercel Git auto-deploy is disabled so migrations and tests finish first. Configure a durable project-scoped `VERCEL_TOKEN` in GitHub secrets. `VERCEL_BOOTSTRAP_TOKEN` is an optional temporary bootstrap credential and must be removed after bootstrap. The workflow synchronizes the web configuration from GitHub secrets; `ADMIN_EMAIL` and `SMTP_FROM` default to `SMTP_USER` when omitted. Keep `SECRET_KEY` and `ENCRYPTION_KEY` stable across web and workers.
+Provider revocation requires reconnecting. Automatic refresh-token exchange is not assumed without a verified provider contract.
 
-Run `PYTHON_DOTENV_DISABLED=1 DATABASE_URL=sqlite:// ENVIRONMENT=development python -m pytest -q`. Set `TEST_DATABASE_URL` to run PostgreSQL migration and concurrency tests; these create and remove isolated `audit_test_*` schemas. Production verification checks health, commit, login, assets and unauthenticated redirects. On verification failure the workflow restores the previous deployment, retaining additive migrations and user data.
+## Historical CSV / shared Notion collectors
+
+The six original entry points remain supported. They share validation and atomic CSV replacement, and persist independent email/Notion tasks in the same `DATABASE_URL` before writing CSV. A failed SMTP or Notion request is replayable even after the CSV has been updated. Upstream errors do not block retrying existing tasks.
+
+The historical workflow now needs the shared database and its migrations. `LEGACY_EMAIL_ENABLED=true` preserves delivery to **unmigrated** recipients from `TO_ADDRS` (or a private local `email.csv`). Every address that has a platform account, active or disabled, is excluded from historical mail. This prevents duplicate channels and makes account deactivation effective. Recipients receive separate messages, never a shared `To` header. `email.csv` is no longer versioned; configure `TO_ADDRS` for GitHub Actions before deployment if recipients previously came only from that file.
+
+To migrate the private recipient list to platform accounts:
+
+```sh
+python -m trackr_app.cli import-legacy-subscribers
+```
+
+This imports only missing accounts, activates baseline preferences and sends no messages. Review their preferences after import. It never reactivates an existing disabled account. Once all recipients are migrated, set `LEGACY_EMAIL_ENABLED=false` to retain CSV/shared Notion only.
+
+`FORCE_EMAIL_ALL=1` creates an explicit resend batch independent of Notion creation status. Ordinary runs deduplicate existing deliveries. `OUTPUT_FILE` overrides the selected script's CSV destination. Off-cycle filters use `OFF_CYCLE_EMAIL_START_TERM`, with `HK_OFF_CYCLE_EMAIL_START_TERM` as the Hong Kong override. Set `LEGACY_TODO_ENABLED=true` with a valid `TODO_DATA_SOURCE_ID` to create/update associated tasks, due two days after opening. It stays off by default. Descriptions come from upstream metadata; collectors no longer fetch arbitrary employer URLs server-side.
+
+## Deployment
+
+Production uses Vercel, PostgreSQL, SMTP and GitHub Actions. Keep `SECRET_KEY` and `ENCRYPTION_KEY` identical between web and workers. Set `ENVIRONMENT=production`, an HTTPS `APP_URL`, and the secrets listed in `.env.example`. The configuration synchronizer also propagates `NOTION_SYNC_ENABLED`.
+
+The production workflow tests PostgreSQL, migrates and deploys, then checks the release. Deployment, platform workers and historical collectors share a concurrency group so they do not execute migrations and workers simultaneously. Platform steps have separate timeouts and continue to the other workers after a failure. GitHub schedules are not an exact-time delivery guarantee. Git auto-deploy remains disabled. Rollback retains additive migrations; rolling back across a schema revision requires verifying compatibility of the target release's health check and models.
+
+Before shipping this revision: provide the historical recipient list through GitHub secrets, verify optional feature flags, and rotate any exposed provider credentials. Changing `ENCRYPTION_KEY` on a populated database requires re-encrypting stored tokens or reconnecting affected accounts; do not blindly replace it.
+
+## Tests
+
+```sh
+PYTHON_DOTENV_DISABLED=1 DATABASE_URL=sqlite:// ENVIRONMENT=development python -m pytest -q
+```
+
+Set `TEST_DATABASE_URL` for real PostgreSQL migration/concurrency tests. They use disposable `audit_test_*` schemas. Alternatively, with a local PostgreSQL installation:
+
+```sh
+POSTGRES_BIN=/path/to/postgresql/bin python scripts/test_postgres_local.py
+```
+
+This starts an isolated loopback-only temporary cluster, runs the suite, stops the server and removes the cluster. It does not enable a system service. The audit regressions in `audit/test_workflow_20260907.py` are now ordinary passing tests, without `xfail` markers.

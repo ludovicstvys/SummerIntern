@@ -30,6 +30,10 @@ class Invitation(Base):
     invited_by_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    delivery_status: Mapped[str] = mapped_column(String(20), default='pending', server_default='pending')
+    attempts: Mapped[int] = mapped_column(Integer, default=0, server_default='0')
+    last_error: Mapped[str | None] = mapped_column(Text)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class MagicLink(Base):
@@ -93,6 +97,36 @@ class Offer(Base):
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     missing_collections: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    sources: Mapped[list[OfferSource]] = relationship(cascade='all, delete-orphan', lazy='selectin')
+
+    def source_label(self, attribute):
+        from .config import settings
+        sources = [s for s in self.sources if s.is_open and s.season == settings.season]
+        return ' / '.join(sorted({getattr(s, attribute) for s in sources if getattr(s, attribute)})) or getattr(self, attribute) or ''
+
+    @property
+    def region_label(self):
+        return self.source_label('region')
+
+    @property
+    def programme_label(self):
+        return self.source_label('programme_type')
+
+
+class OfferSource(Base):
+    __tablename__ = 'offer_sources'
+    __table_args__ = (UniqueConstraint('offer_id', 'region', 'programme_type', 'season'),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    offer_id: Mapped[int] = mapped_column(ForeignKey('offers.id', ondelete='CASCADE'), index=True)
+    region: Mapped[str] = mapped_column(String(50))
+    programme_type: Mapped[str] = mapped_column(String(30))
+    season: Mapped[str] = mapped_column(String(20))
+    start_term: Mapped[str | None] = mapped_column(String(100))
+    opening_date: Mapped[date | None] = mapped_column(Date)
+    closing_date: Mapped[date | None] = mapped_column(Date)
+    is_open: Mapped[bool] = mapped_column(Boolean, default=True)
+    missing_collections: Mapped[int] = mapped_column(Integer, default=0)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class UserOffer(Base):
@@ -119,6 +153,7 @@ class Delivery(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class NotionConnection(Base):
@@ -133,6 +168,8 @@ class NotionConnection(Base):
     data_source_id: Mapped[str | None] = mapped_column(String(100))
     last_error: Mapped[str | None] = mapped_column(Text)
     connected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    setup_status: Mapped[str] = mapped_column(String(20), default='idle', server_default='idle')
+    parent_page_id: Mapped[str | None] = mapped_column(String(100))
     user: Mapped[User] = relationship(back_populates="notion")
 
 
@@ -147,6 +184,28 @@ class NotionSync(Base):
     attempts: Mapped[int] = mapped_column(Integer, default=0)
     last_error: Mapped[str | None] = mapped_column(Text)
     synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WorkerState(Base):
+    __tablename__ = 'worker_states'
+    key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class LegacyTask(Base):
+    __tablename__ = 'legacy_tasks'
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    source: Mapped[str] = mapped_column(String(160), index=True)
+    channel: Mapped[str] = mapped_column(String(20))
+    recipient: Mapped[str] = mapped_column(String(320), default='')
+    payload: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default='pending', index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class AuthLimit(Base):

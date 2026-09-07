@@ -1,4 +1,3 @@
-from playwright.sync_api import sync_playwright
 import csv
 import smtplib
 import os
@@ -14,7 +13,7 @@ from trackr_common import scrape_open_programmes
 
 
 def load_env_file(path=".env"):
-    if not os.path.exists(path):
+    if os.getenv("PYTHON_DOTENV_DISABLED") == "1" or not os.path.exists(path):
         return
 
     with open(path, encoding="utf-8") as f:
@@ -368,88 +367,9 @@ class OfferDescriptionParser(HTMLParser):
         return None
 
 
-def fetch_offer_link_description(url):
-    url = (url or "").strip()
-    if not url:
-        return None
-    if url in _OFFER_DESCRIPTION_CACHE:
-        return _OFFER_DESCRIPTION_CACHE[url]
-
-    description = None
-    try:
-        response = requests.get(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-                ),
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            },
-            allow_redirects=True,
-            timeout=OFFER_DESCRIPTION_TIMEOUT,
-        )
-        content_type = response.headers.get("Content-Type", "")
-        if response.ok and "html" in content_type.lower():
-            parser = OfferDescriptionParser()
-            parser.feed(response.text[:250000])
-            description = parser.best_description()
-    except requests.RequestException:
-        description = None
-
-    description = truncate_text(description)
-    _OFFER_DESCRIPTION_CACHE[url] = description
-    return description
-
-
-def fetch_offer_rendered_description(url):
-    url = (url or "").strip()
-    if not url:
-        return None
-
-    browser = None
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            page = browser.new_page(
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-                )
-            )
-            page.goto(url, wait_until="domcontentloaded", timeout=PLAYWRIGHT_DESCRIPTION_TIMEOUT_MS)
-            page.wait_for_timeout(2500)
-            candidates = page.locator(
-                "main, article, section, [role='main'], "
-                "[class*='job'], [class*='description'], [class*='posting'], "
-                "[data-automation-id*='description'], [data-testid*='description'], "
-                "p, li"
-            ).evaluate_all(
-                """nodes => nodes
-                    .map(node => node.innerText || node.textContent || '')
-                    .map(text => text.replace(/\\s+/g, ' ').trim())
-                    .filter(text => text.length >= 80)
-                """
-            )
-            return best_visible_description(candidates)
-    except Exception:
-        return None
-    finally:
-        if browser:
-            try:
-                browser.close()
-            except Exception:
-                pass
-
-
 def offer_notes_for_notion(offer):
-    return (
-        fetch_offer_link_description(offer.get("offer_url"))
-        or fetch_offer_rendered_description(offer.get("offer_url"))
-        or offer.get("notes")
-        or offer.get("company_description")
-        or ""
-    )
+    return offer.get('notes') or offer.get('company_description') or ''
+
 
 def scrape_open_summer_internships():
     return scrape_open_programmes(
@@ -508,30 +428,7 @@ TRACKING_QUERY_PARAMETERS = {
 }
 
 
-def canonical_offer_url(value):
-    url = (value or "").strip()
-    if not url:
-        return ""
-    try:
-        parts = urlsplit(url)
-        filtered_query = [
-            (name, query_value)
-            for name, query_value in parse_qsl(parts.query, keep_blank_values=True)
-            if not name.lower().startswith("utm_")
-            and name.lower() not in TRACKING_QUERY_PARAMETERS
-        ]
-        path = parts.path.rstrip("/") or "/"
-        return urlunsplit(
-            (
-                parts.scheme.lower(),
-                parts.netloc.lower(),
-                path,
-                urlencode(filtered_query, doseq=True),
-                parts.fragment,
-            )
-        )
-    except ValueError:
-        return url
+from trackr_common import canonical_offer_url
 
 
 def offer_key(offer):
@@ -722,13 +619,15 @@ def build_email_html(open_offers, programme_label="summer internship(s)"):
 """
 
 
-def send_email(open_offers, csv_path=None, programme_label="summer internship(s)"):
-    smtp_server = clean_env("SMTP_SERVER", "smtp.gmail.com")
-    smtp_port = int(clean_env("SMTP_PORT", "587"))
+def send_email(open_offers, csv_path=None, programme_label="summer internship(s)", recipients=None, idempotency_key=None):
+    smtp_server = clean_env("SMTP_SERVER", "smtp.gmail.com") or 'smtp.gmail.com'
+    smtp_port = int(clean_env("SMTP_PORT", "587") or '587')
     smtp_user = clean_env("SMTP_USER")
     smtp_pass = clean_env("SMTP_PASS_APP") or clean_env("SMTP_PASS")
     from_addr = clean_env("FROM_ADDR") or smtp_user
-    to_addrs = read_email_recipients()
+    from trackr_common import smtp_password
+    smtp_pass = smtp_password(smtp_pass or "", smtp_server)
+    to_addrs = recipients if recipients is not None else read_email_recipients()
 
     missing = [
         name
@@ -747,7 +646,12 @@ def send_email(open_offers, csv_path=None, programme_label="summer internship(s)
     msg = EmailMessage()
     msg["Subject"] = f"{len(open_offers)} nouveau(x) {programme_label} ouvert(s)"
     msg["From"] = from_addr
-    msg["To"] = ", ".join(to_addrs)
+    if len(to_addrs) != 1:
+        raise ValueError('Use the durable outbox to send individually')
+    msg['To'] = to_addrs[0]
+    if idempotency_key:
+        import hashlib
+        msg['Message-ID'] = '<' + hashlib.sha256(idempotency_key.encode()).hexdigest() + '@trackr.local>'
     msg.set_content(build_email_text(open_offers, programme_label))
     msg.add_alternative(build_email_html(open_offers, programme_label), subtype="html")
 
@@ -765,9 +669,11 @@ def send_email(open_offers, csv_path=None, programme_label="summer internship(s)
         smtp.starttls()
         smtp.ehlo()
         smtp.login(smtp_user, smtp_pass)
-        smtp.send_message(msg, from_addr=from_addr, to_addrs=to_addrs)
+        refused = smtp.send_message(msg, from_addr=from_addr, to_addrs=to_addrs)
+        if refused:
+            raise smtplib.SMTPRecipientsRefused(refused)
 
-    print(f"Email envoyé à : {to_addrs}")
+    print("Email sent to one recipient")
     return True
 
 
@@ -1062,6 +968,15 @@ def sync_to_notion(open_offers):
     notion_schema = fetch_data_source_schema(notion_data_source_id)
 
     existing_offers = fetch_existing_offers(notion_data_source_id)
+    todo_target = None
+    if os.getenv('LEGACY_TODO_ENABLED', 'false').lower() == 'true':
+        if not TODO_DATA_SOURCE_ID:
+            raise RuntimeError('TODO_DATA_SOURCE_ID is required when legacy TODO is enabled')
+        todo_target = resolve_data_source_id(TODO_DATA_SOURCE_ID, 'Notion tasks')
+        todo_schema = fetch_data_source_schema(todo_target)
+        if not todo_schema_ready(todo_schema):
+            raise RuntimeError('Invalid Notion TODO schema')
+        existing_todos = fetch_existing_todos(todo_target)
     created = 0
     updated = 0
     opened = 0
@@ -1143,6 +1058,9 @@ def sync_to_notion(open_offers):
             created_offer_urls.add(offer_url)
             audit_log(f"offer create ok | {page_audit_summary(created_page)} | {offer_audit_label(offer)}")
 
+        if todo_target:
+            upsert_todo_for_offer(headers, offer, offer.get('opening_date'), todo_target, todo_schema, existing_todos)
+
     print(
         "Notion sync: "
         f"{created} créées, {updated} mises à jour, {opened} passées à Opened, "
@@ -1185,18 +1103,7 @@ def log_run_summary(open_offers):
     print(f"Stages: {stages}")
     print(f"Regions: {regions}")
 
-if __name__ == "__main__":
-    offres = deduplicate_offers(scrape_open_summer_internships())
-    previous_offers = read_process_csv("processus_ouverts.csv")
-    new_offers = detect_new_offers(offres, previous_offers)
-    log_run_summary(offres)
-    notion_result = sync_new_offers_to_notion(new_offers)
-    csv_file = ecriture_csv(offres)
-    email_urls = notion_result["created_offer_urls"] | notion_result["opened_offer_urls"]
-    email_offers = [offer for offer in new_offers if (offer.get("offer_url") or "").strip() in email_urls]
-    if email_offers:
-        print(f"{len(email_offers)} nouvelle(s) offre(s) détectée(s), envoi email")
-        send_email(email_offers, csv_file)
-    else:
-        print("Aucune nouvelle offre détectée, email non envoyé")
-  
+if __name__ == '__main__':
+    from trackr_app.config import settings
+    from trackr_app.legacy import run_collector
+    raise SystemExit(run_collector({'region': 'UK', 'industry': 'Finance', 'season': settings.season, 'type': 'summer-internships'}, os.getenv('OUTPUT_FILE', 'processus_ouverts.csv'), 'UK summer internships'))

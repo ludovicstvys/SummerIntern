@@ -7,3 +7,7 @@ trackr.db
 .vercel/
 .DS_Store
 .env.local
+
+# Private recipient list and local database backups
+email.csv
+.trackr-backups/

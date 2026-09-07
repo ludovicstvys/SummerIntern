@@ -1,13 +1,15 @@
 import json
+import time
 from urllib.parse import urlencode
 
 import requests
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, or_, update
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .models import NotionConnection, NotionSync, Offer, User, utcnow
 from .security import decrypt, encrypt
+from .operations import error_code, next_retry
 
 
 def headers(token: str) -> dict[str, str]:
@@ -36,12 +38,15 @@ def save_connection(db: Session, user_id: int, payload: dict) -> NotionConnectio
         db.execute(delete(NotionSync).where(NotionSync.connection_id == connection.id))
         connection.database_id = None
         connection.data_source_id = None
+        connection.setup_status, connection.parent_page_id = 'idle', None
     connection.access_token_encrypted = encrypt(payload["access_token"])
     connection.refresh_token_encrypted = encrypt(payload.get("refresh_token"))
     connection.workspace_id = payload.get("workspace_id")
     connection.workspace_name = payload.get("workspace_name")
     connection.last_error = None
     db.add(connection)
+    db.flush()
+    db.execute(update(NotionSync).where(NotionSync.connection_id == connection.id, NotionSync.status == 'failed').values(status='pending', attempts=0, next_attempt_at=None, last_error=None))
     db.commit()
     db.refresh(connection)
     return connection
@@ -100,6 +105,8 @@ def create_offer_database(db: Session, connection: NotionConnection, parent_page
         detail.raise_for_status()
         connection.data_source_id = detail.json()["data_sources"][0]["id"]
     connection.last_error = None
+    connection.setup_status = 'ready'
+    connection.parent_page_id = parent_page_id
     db.flush()
 
 
@@ -107,13 +114,33 @@ def _rich(value):
     return {"rich_text": [{"text": {"content": str(value)[:1900]}}]} if value else {"rich_text": []}
 
 
+def recover_database(db, connection, database_id):
+    import uuid
+    database_id = str(uuid.UUID(database_id))
+    response = requests.get(f'https://api.notion.com/v1/databases/{database_id}', headers=headers(decrypt(connection.access_token_encrypted)), timeout=30)
+    response.raise_for_status()
+    data = response.json()
+    if connection.parent_page_id and data.get('parent', {}).get('page_id', '').replace('-', '') != connection.parent_page_id.replace('-', ''):
+        raise ValueError('Database belongs to another parent')
+    source_id = data['data_sources'][0]['id']
+    response = requests.get(f'https://api.notion.com/v1/data_sources/{source_id}', headers=headers(decrypt(connection.access_token_encrypted)), timeout=30)
+    response.raise_for_status()
+    schema = response.json()['properties']
+    expected = {'Name': 'title', 'Company': 'rich_text', 'Offer URL': 'url', 'Region': 'select', 'Programme Type': 'select', 'Start Term': 'rich_text', 'Categories': 'multi_select', 'Opening Date': 'date', 'Closing Date': 'date', 'Stage': 'select', 'Rolling': 'checkbox', 'Needs CV': 'checkbox', 'Needs Cover Letter': 'checkbox', 'Notes': 'rich_text', 'Status': 'select'}
+    if any(schema.get(k, {}).get('type') != v for k, v in expected.items()):
+        raise ValueError('Database schema does not match Trackr')
+    connection.database_id, connection.data_source_id = database_id, source_id
+    connection.setup_status, connection.last_error = 'ready', None
+    db.flush()
+
+
 def offer_properties(offer: Offer) -> dict:
     categories = json.loads(offer.categories or "[]")
     def date_prop(value): return {"date": {"start": value.isoformat()}} if value else {"date": None}
     return {
         "Name": {"title": [{"text": {"content": offer.name[:1900]}}]}, "Company": _rich(offer.company),
-        "Offer URL": {"url": offer.canonical_url}, "Region": {"select": {"name": offer.region}},
-        "Programme Type": {"select": {"name": offer.programme_type}}, "Start Term": _rich(offer.start_term),
+        "Offer URL": {"url": offer.canonical_url}, "Region": {"select": {"name": offer.region_label}},
+        "Programme Type": {"select": {"name": offer.programme_label}}, "Start Term": _rich(offer.source_label('start_term')),
         "Categories": {"multi_select": [{"name": str(item)[:100]} for item in categories]},
         "Opening Date": date_prop(offer.opening_date), "Closing Date": date_prop(offer.closing_date),
         "Stage": {"select": {"name": offer.stage[:100]}}, "Rolling": {"checkbox": offer.rolling},
@@ -123,10 +150,13 @@ def offer_properties(offer: Offer) -> dict:
 
 
 def process_notion_queue(db: Session) -> int:
-    jobs = db.execute(select(NotionSync.id, NotionConnection.user_id).join(NotionConnection, NotionConnection.id == NotionSync.connection_id).where(NotionSync.status == "pending", NotionSync.attempts < 5)).all()
+    deadline = time.monotonic() + 90
+    jobs = db.execute(select(NotionSync.id, NotionConnection.user_id).join(NotionConnection, NotionConnection.id == NotionSync.connection_id).where(NotionSync.status == "pending", NotionSync.attempts < 5, or_(NotionSync.next_attempt_at.is_(None), NotionSync.next_attempt_at <= utcnow()))).all()
     db.commit()
     completed = 0
     for job_id, user_id in jobs:
+        if time.monotonic() >= deadline:
+            break
         user = db.scalar(select(User).where(User.id == user_id).with_for_update(skip_locked=True).execution_options(populate_existing=True))
         if not user:
             db.rollback()
@@ -165,10 +195,12 @@ def process_notion_queue(db: Session) -> int:
             job.notion_page_id = response.json()["id"]
             job.status, job.synced_at, job.last_error = "synced", utcnow(), None
             connection.last_error = None
+            job.next_attempt_at = None
             completed += 1
         except Exception as exc:
             job.attempts += 1
-            job.last_error = type(exc).__name__
+            job.last_error = error_code(exc)
+            job.next_attempt_at = next_retry(job.attempts)
             job.status = "failed" if job.attempts >= 5 else "pending"
             connection.last_error = job.last_error
         db.commit()

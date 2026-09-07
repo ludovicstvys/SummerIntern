@@ -11,13 +11,13 @@ from .models import Offer
 def offer_email_html(offers: list[Offer], title: str) -> str:
     rows = "".join(
         f'<tr><td><strong>{escape(o.company)}</strong><br>{escape(o.name)}</td>'
-        f'<td>{escape(o.region)}</td><td>{escape(o.start_term or "—")}</td>'
+        f'<td>{escape(o.region_label)}</td><td>{escape(o.start_term or "—")}</td>'
         f'<td><a href="{escape(o.offer_url, quote=True)}">View offer</a></td></tr>'
         for o in offers
     )
     return f"""<!doctype html><html><body style="font-family:Arial,sans-serif;color:#18221d">
     <div style="max-width:760px;margin:auto"><h1>{escape(title)}</h1>
-    <p>{len(offers)} new matching opportunity{'ies' if len(offers) != 1 else ''}.</p>
+    <p>{len(offers)} new matching {'opportunity' if len(offers) == 1 else 'opportunities'}.</p>
     <table style="width:100%;border-collapse:collapse" cellpadding="10"><thead><tr>
     <th align="left">Opportunity</th><th align="left">Region</th><th align="left">Start</th><th></th>
     </tr></thead><tbody>{rows}</tbody></table></div></body></html>"""
@@ -42,7 +42,9 @@ def send_email(to: str, subject: str, html: str, idempotency_key: str) -> str:
         client.starttls()
         client.ehlo()
         client.login(settings.smtp_user, settings.smtp_password)
-        client.send_message(message)
+        refused = client.send_message(message)
+        if refused:
+            raise smtplib.SMTPRecipientsRefused(refused)
     return message_id
 
 

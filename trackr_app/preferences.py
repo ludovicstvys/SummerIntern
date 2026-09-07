@@ -6,7 +6,9 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Delivery, NotionSync, Offer, Preference, UserOffer, utcnow
+from .models import Delivery, NotionSync, Offer, Preference, User, UserOffer, utcnow
+from .config import settings
+from trackr_common import dates_are_open
 
 PROGRAM_TYPES = ("summer", "off-cycle")
 REGIONS = ("France", "UK", "Hong Kong")
@@ -28,19 +30,29 @@ def infer_start_term(categories: list[str]) -> str | None:
 
 
 def offer_matches(offer: Offer, preference: Preference) -> bool:
-    if offer.programme_type not in json_list(preference.program_types):
-        return False
-    if offer.region not in json_list(preference.regions):
-        return False
     terms = json_list(preference.start_terms)
-    return offer.programme_type != "off-cycle" or not terms or offer.start_term in terms
+    sources = offer.sources or [offer]
+    return any(
+        source.region in json_list(preference.regions)
+        and source.programme_type in json_list(preference.program_types)
+        and (source is offer or (source.is_open and source.season == settings.season))
+        and dates_are_open(source.opening_date, source.closing_date)
+        and (source.programme_type != 'off-cycle' or not terms or source.start_term in terms)
+        for source in sources
+    )
+
+
+def offer_is_open(offer):
+    if offer.sources:
+        return offer.is_open and any(s.is_open and s.season == settings.season and dates_are_open(s.opening_date, s.closing_date) for s in offer.sources)
+    return offer.is_open and dates_are_open(offer.opening_date, offer.closing_date)
 
 
 def matching_offers(db: Session, preference: Preference) -> list[Offer]:
-    return [offer for offer in db.scalars(select(Offer).where(Offer.is_open.is_(True))).all() if offer_matches(offer, preference)]
+    return [offer for offer in db.scalars(select(Offer).where(Offer.is_open.is_(True))).all() if offer_is_open(offer) and offer_matches(offer, preference)]
 
 
-def activate_preference(db: Session, preference: Preference) -> int:
+def activate_preference(db: Session, preference: Preference, commit=True) -> int:
     preference.status = "active"
     preference.activated_at = utcnow()
     # Keep already delivered history; reconcile only unfinished alerts.
@@ -48,10 +60,10 @@ def activate_preference(db: Session, preference: Preference) -> int:
     sent_offers = {item.offer_id for item in deliveries if item.status == "sent"}
     by_mode = {(item.offer_id, item.mode): item for item in deliveries}
     for item in deliveries:
-        if item.status not in ("pending", "processing", "failed"):
+        if item.status not in ("pending", "processing", "failed", "cancelled"):
             continue
         offer = db.get(Offer, item.offer_id)
-        if item.offer_id in sent_offers or not offer or not offer.is_open or not offer_matches(offer, preference):
+        if item.offer_id in sent_offers or not offer or not offer_is_open(offer) or not offer_matches(offer, preference):
             item.status = "cancelled"
             item.processing_started_at = None
         elif item.mode != preference.delivery_mode:
@@ -65,6 +77,9 @@ def activate_preference(db: Session, preference: Preference) -> int:
                 by_mode[(item.offer_id, preference.delivery_mode)] = target
             elif target.status == "cancelled":
                 target.status = "failed" if target.attempts >= 5 else "pending"
+        elif item.status == 'cancelled':
+            item.status = 'failed' if item.attempts >= 5 else 'pending'
+            item.next_attempt_at = None
     offers = matching_offers(db, preference)
     for offer in offers:
         existing = db.scalar(select(UserOffer).where(UserOffer.user_id == preference.user_id, UserOffer.offer_id == offer.id))
@@ -74,14 +89,19 @@ def activate_preference(db: Session, preference: Preference) -> int:
             queued = db.scalar(select(NotionSync).where(NotionSync.connection_id == preference.user.notion.id, NotionSync.offer_id == offer.id))
             if not queued:
                 db.add(NotionSync(connection_id=preference.user.notion.id, offer_id=offer.id))
-    db.commit()
+            elif queued.status == 'cancelled':
+                queued.status = 'failed' if queued.attempts >= 5 else 'pending'
+    if commit:
+        db.commit()
     return len(offers)
 
 
 def queue_new_offer(db: Session, offer: Offer) -> None:
-    preferences = db.scalars(select(Preference).where(Preference.status == "active")).all()
-    for preference in preferences:
-        if not preference.user.is_active or not offer_matches(offer, preference):
+    user_ids = db.scalars(select(Preference.user_id).where(Preference.status == 'active').order_by(Preference.user_id)).all()
+    for user_id in user_ids:
+        user = db.scalar(select(User).where(User.id == user_id).with_for_update().execution_options(populate_existing=True))
+        preference = db.scalar(select(Preference).where(Preference.user_id == user_id).execution_options(populate_existing=True))
+        if not user.is_active or preference.status != 'active' or not offer_is_open(offer) or not offer_matches(offer, preference):
             continue
         matched = db.scalar(select(UserOffer).where(UserOffer.user_id == preference.user_id, UserOffer.offer_id == offer.id))
         if matched:
@@ -89,7 +109,8 @@ def queue_new_offer(db: Session, offer: Offer) -> None:
         db.add(UserOffer(user_id=preference.user_id, offer_id=offer.id, baseline=False))
         db.add(Delivery(user_id=preference.user_id, offer_id=offer.id, mode=preference.delivery_mode))
         if preference.user.notion and preference.user.notion.data_source_id:
-            db.add(NotionSync(connection_id=preference.user.notion.id, offer_id=offer.id))
+            if not db.scalar(select(NotionSync).where(NotionSync.connection_id == preference.user.notion.id, NotionSync.offer_id == offer.id)):
+                db.add(NotionSync(connection_id=preference.user.notion.id, offer_id=offer.id))
 
 
 def queue_notion_update(db: Session, offer: Offer) -> None:

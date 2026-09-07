@@ -14,6 +14,7 @@ def main():
         'NOTION_CLIENT_ID', 'NOTION_CLIENT_SECRET', 'ADMIN_EMAIL', 'SMTP_FROM',
     )}
     values.update(ENVIRONMENT='production', APP_URL='https://trackr-alerts.vercel.app', SMTP_SERVER=os.getenv('SMTP_SERVER') or 'smtp.gmail.com', SMTP_PORT=os.getenv('SMTP_PORT') or '587')
+    values['NOTION_SYNC_ENABLED'] = os.getenv('NOTION_SYNC_ENABLED', 'false')
     values['ADMIN_EMAIL'] = values['ADMIN_EMAIL'] or values['SMTP_USER']
     values['SMTP_FROM'] = values['SMTP_FROM'] or values['SMTP_USER']
     for key, value in values.items():

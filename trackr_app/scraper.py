@@ -1,20 +1,18 @@
 import json
 from datetime import date
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
-
 from trackr_common import canonical_offer_url, deduplicate_offers, scrape_open_programmes
-
 from .config import settings
-from .models import Offer, utcnow
+from .models import Offer, OfferSource, utcnow
 from .preferences import infer_start_term, queue_new_offer, queue_notion_update
 from .notion import offer_properties
+from .operations import lock_state, error_code
 
 TRACKERS = [
-    {"region": region, "industry": "Finance", "season": settings.season, "type": api_type}
-    for region in ("France", "UK", "Hong Kong")
-    for api_type in ("summer-internships", "off-cycle-internships")
+    {'region': region, 'industry': 'Finance', 'season': settings.season, 'type': kind}
+    for region in ('France', 'UK', 'Hong Kong')
+    for kind in ('summer-internships', 'off-cycle-internships')
 ]
 
 
@@ -23,77 +21,96 @@ def _date(value):
 
 
 def scrape_all(db: Session) -> dict[str, int]:
-    seen_urls: set[str] = set()
-    created = updated = closed = failed = 0
+    seen = set()
+    totals = dict(created=0, updated=0, closed=0, failed_trackers=0)
     for params in TRACKERS:
+        key = '/'.join((params.get('season', settings.season), params['region'], params['type']))
+        delta = dict(created=0, updated=0, closed=0)
         try:
+            # Serialize overlapping collectors before fetching, so an older snapshot
+            # cannot overwrite a newer one. SMTP workers use separate user locks.
+            lock_state(db, 'scrape-lock')
+            state = lock_state(db, 'source/' + key)
             raw = deduplicate_offers(scrape_open_programmes(params))
-            if not raw:
-                raise RuntimeError("Tracker returned no usable open offers")
+            if not raw and not getattr(raw, 'complete', False):
+                raise RuntimeError('Tracker returned an ambiguous empty snapshot')
             for item in raw:
-                if not item.get("name") or not canonical_offer_url(item.get("offer_url")):
-                    raise ValueError("Incomplete offer in tracker response")
-                _date(item.get("opening_date"))
-                _date(item.get("closing_date"))
-        except Exception as exc:
-            print(f"Tracker failed for {params['region']} {params['type']}: {exc}")
-            failed += 1
-            continue
-        programme_type = "summer" if params["type"] == "summer-internships" else "off-cycle"
-        tracker_seen: set[str] = set()
-        for item in raw:
-            canonical = canonical_offer_url(item["offer_url"])
-            if not canonical:
-                continue
-            seen_urls.add(canonical)
-            tracker_seen.add(canonical)
-            offer = db.scalar(select(Offer).where(Offer.canonical_url == canonical))
-            is_new = offer is None
-            if is_new:
-                offer = Offer(canonical_url=canonical, offer_url=item["offer_url"], name=item["name"], region=params["region"], programme_type=programme_type)
-                db.add(offer)
-                created += 1
-            else:
-                updated += 1
-            before = offer_properties(offer) if not is_new else None
-            categories = item.get("categories") or []
-            offer.offer_url = item["offer_url"]
-            offer.name = item["name"]
-            offer.company = item.get("company") or ""
-            offer.company_id = str(item.get("company_id") or "") or None
-            offer.region = params["region"]
-            offer.programme_type = programme_type
-            offer.categories = json.dumps(categories)
-            offer.start_term = infer_start_term(categories) if programme_type == "off-cycle" else None
-            offer.opening_date = _date(item.get("opening_date"))
-            offer.closing_date = _date(item.get("closing_date"))
-            offer.stage = item.get("stage") or "Unknown"
-            offer.rolling = bool(item.get("rolling"))
-            offer.needs_cv = bool(item.get("needs_cv"))
-            offer.needs_cover_letter = bool(item.get("needs_cover_letter"))
-            offer.company_description = item.get("company_description")
-            offer.notes = item.get("notes")
-            offer.is_open = True
-            offer.missing_collections = 0
-            offer.last_seen_at = utcnow()
+                if not item.get('name') or not canonical_offer_url(item.get('offer_url')):
+                    raise ValueError('Incomplete offer')
+                _date(item.get('opening_date')); _date(item.get('closing_date'))
+            kind = 'summer' if params['type'] == 'summer-internships' else 'off-cycle'
+            season = params.get('season', settings.season)
+            tracker_seen = set()
+            # Backfill fixtures/local databases created before the migration.
+            for offer in db.scalars(select(Offer).where(~Offer.sources.any())).all():
+                offer.sources.append(OfferSource(region=offer.region, programme_type=offer.programme_type,
+                    season=settings.season, start_term=offer.start_term, is_open=offer.is_open,
+                    opening_date=offer.opening_date, closing_date=offer.closing_date,
+                    missing_collections=offer.missing_collections, last_seen_at=offer.last_seen_at))
             db.flush()
-            if is_new:
+            changed = {}
+            for item in raw:
+                canonical = canonical_offer_url(item['offer_url'])
+                tracker_seen.add(canonical)
+                offer = db.scalar(select(Offer).where(Offer.canonical_url == canonical))
+                is_new = offer is None
+                if is_new:
+                    offer = Offer(canonical_url=canonical, offer_url=canonical, name=item['name'], region=params['region'], programme_type=kind)
+                    db.add(offer)
+                before = offer_properties(offer) if not is_new else None
+                source = next((s for s in offer.sources if (s.region, s.programme_type, s.season) == (params['region'], kind, season)), None)
+                if source is None:
+                    source = OfferSource(region=params['region'], programme_type=kind, season=season)
+                    offer.sources.append(source)
+                categories = item.get('categories') or []
+                source.start_term = infer_start_term(categories) if kind == 'off-cycle' else None
+                source.opening_date, source.closing_date = _date(item.get('opening_date')), _date(item.get('closing_date'))
+                source.is_open, source.missing_collections, source.last_seen_at = True, 0, utcnow()
+                offer.offer_url, offer.name = canonical, item['name']
+                offer.company = item.get('company') or ''
+                offer.company_id = str(item.get('company_id') or '') or None
+                offer.categories = json.dumps(categories)
+                offer.start_term = source.start_term
+                offer.opening_date, offer.closing_date = _date(item.get('opening_date')), _date(item.get('closing_date'))
+                offer.stage = item.get('stage') or 'Unknown'
+                for attr in ('rolling', 'needs_cv', 'needs_cover_letter'):
+                    setattr(offer, attr, bool(item.get(attr)))
+                offer.company_description, offer.notes = item.get('company_description'), item.get('notes')
+                offer.is_open, offer.missing_collections, offer.last_seen_at = True, 0, utcnow()
+                db.flush()
+                changed[offer.id] = (offer, before)
+                delta['created' if is_new else 'updated'] += 1
+            sources = db.scalars(select(OfferSource).where(OfferSource.region == params['region'], OfferSource.programme_type == kind, OfferSource.season == season, OfferSource.is_open.is_(True))).all()
+            for source in sources:
+                offer = db.get(Offer, source.offer_id)
+                if offer.canonical_url in tracker_seen:
+                    continue
+                before = offer_properties(offer)
+                source.missing_collections += 1
+                if source.missing_collections >= 2:
+                    source.is_open = False
+                offer.missing_collections = source.missing_collections
+                was_open = offer.is_open
+                offer.is_open = any(s.is_open and s.season == settings.season for s in offer.sources)
+                if was_open and not offer.is_open:
+                    delta['closed'] += 1
+                changed[offer.id] = (offer, before)
+            # Stable user locking order inside queue_new_offer. Re-evaluate existing
+            # offers as well, but retain the unique user/offer delivery history.
+            for offer, before in changed.values():
                 queue_new_offer(db, offer)
-            elif before != offer_properties(offer):
-                queue_notion_update(db, offer)
-        stale_offers = db.scalars(
-            select(Offer).where(
-                Offer.region == params["region"],
-                Offer.programme_type == programme_type,
-                Offer.is_open.is_(True),
-                Offer.canonical_url.not_in(tracker_seen),
-            )
-        ).all()
-        for offer in stale_offers:
-            offer.missing_collections += 1
-            if offer.missing_collections >= 2:
-                offer.is_open = False
-                queue_notion_update(db, offer)
-                closed += 1
-        db.commit()
-    return {"created": created, "updated": updated, "closed": closed, "failed_trackers": failed, "seen": len(seen_urls)}
+                if before is not None and before != offer_properties(offer):
+                    queue_notion_update(db, offer)
+            state.last_success_at, state.last_error = utcnow(), None
+            db.commit()
+            seen.update(tracker_seen)
+            for name in delta:
+                totals[name] += delta[name]
+        except Exception as exc:
+            db.rollback()
+            state = lock_state(db, 'source/' + key)
+            state.last_error = error_code(exc)
+            db.commit()
+            totals['failed_trackers'] += 1
+            print(f'Tracker failed for {key}: {error_code(exc)}')
+    return {**totals, 'seen': len(seen)}

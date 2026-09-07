@@ -4,12 +4,11 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Trackr Alerts{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}">
-  <script src="https://unpkg.com/htmx.org@2.0.6" defer></script>
 </head>
 <body>
   <header class="site-header"><a class="brand" href="/dashboard"><span>TA</span> Trackr Alerts</a>
     {% if user %}<nav><a href="/dashboard">Opportunities</a><a href="/preferences">Preferences</a>{% if user.role == 'admin' %}<a href="/admin">People</a>{% endif %}<form action="/logout" method="post"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link-button">Sign out</button></form></nav>{% endif %}
   </header>
-  <main>{% block content %}{% endblock %}</main>
+  <main>{% if request.query_params.get("message") %}<p role="status">{{ request.query_params.get("message") }}</p>{% endif %}{% block content %}{% endblock %}</main>
 </body>
 </html>

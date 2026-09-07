@@ -4,7 +4,7 @@ on:
     - cron: "*/10 * * * *"
   workflow_dispatch:
 concurrency:
-  group: legacy-internships-scrape
+  group: trackr-production-state
   cancel-in-progress: false
 permissions:
   contents: write
@@ -12,17 +12,20 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    environment: production
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      PYTHON_DOTENV_DISABLED: "1"
+      LEGACY_EMAIL_ENABLED: ${{ vars.LEGACY_EMAIL_ENABLED || 'true' }}
+      LEGACY_TODO_ENABLED: ${{ vars.LEGACY_TODO_ENABLED || 'false' }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install legacy dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install playwright requests
-          python -m playwright install --with-deps chromium
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
       - name: Run all legacy collectors independently
         id: collectors
         continue-on-error: true
@@ -40,7 +43,7 @@ jobs:
         run: |
           failed=0
           for script in test.py scrape_off_cycle_fr.py scrape_summer_fr.py scrape_off_cycle_uk.py scrape_summer_hk.py scrape_off_cycle_hk.py; do
-            python "$script" || failed=1
+            timeout 150s python "$script" || failed=1
           done
           exit "$failed"
       - name: Commit valid CSV updates

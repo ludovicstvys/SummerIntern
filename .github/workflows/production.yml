@@ -5,7 +5,7 @@ on:
     paths-ignore: ["processus_ouverts*.csv"]
   workflow_dispatch:
 concurrency:
-  group: trackr-production
+  group: trackr-production-state
   cancel-in-progress: false
 permissions:
   contents: read
@@ -47,6 +47,7 @@ jobs:
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN || secrets.VERCEL_BOOTSTRAP_TOKEN }}
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      NOTION_SYNC_ENABLED: ${{ vars.NOTION_SYNC_ENABLED || 'false' }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       SECRET_KEY: ${{ secrets.SECRET_KEY }}
       ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}

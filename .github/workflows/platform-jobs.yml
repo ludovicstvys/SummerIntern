@@ -4,14 +4,14 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 concurrency:
-  group: trackr-platform-jobs
+  group: trackr-production-state
   cancel-in-progress: false
 permissions:
   contents: read
 jobs:
   process:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     environment: production
     env:
       ENVIRONMENT: production
@@ -29,6 +29,7 @@ jobs:
       NOTION_CLIENT_SECRET: ${{ secrets.NOTION_CLIENT_SECRET }}
       NOTION_VERSION: "2025-09-03"
       TRACKR_SEASON: "2027"
+      NOTION_SYNC_ENABLED: ${{ vars.NOTION_SYNC_ENABLED || 'false' }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -36,11 +37,30 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install -r requirements.txt
-      - name: Collect offers and send alerts
-        run: |
-          failed=0
-          python -m trackr_app.cli scrape-all || failed=1
-          python -m trackr_app.cli process-immediate-alerts || failed=1
-          python -m trackr_app.cli process-digests || failed=1
-          # Platform Notion synchronization is temporarily paused.
-          exit "$failed"
+      - name: Collect offers
+        id: scrape
+        continue-on-error: true
+        run: timeout 210s python -m trackr_app.cli scrape-all
+      - name: Send invitations
+        id: invitations
+        continue-on-error: true
+        run: timeout 150s python -m trackr_app.cli process-invitations
+      - name: Send immediate alerts
+        id: immediate
+        continue-on-error: true
+        run: timeout 150s python -m trackr_app.cli process-immediate-alerts
+      - name: Send daily digests
+        id: digests
+        continue-on-error: true
+        run: timeout 150s python -m trackr_app.cli process-digests
+      - name: Sync personal Notion databases when enabled
+        id: notion
+        continue-on-error: true
+        run: timeout 180s python -m trackr_app.cli sync-notion
+      - name: Check freshness and queues
+        id: operations
+        continue-on-error: true
+        run: python -m trackr_app.cli check-operations
+      - name: Report processing failure
+        if: steps.scrape.outcome == 'failure' || steps.invitations.outcome == 'failure' || steps.immediate.outcome == 'failure' || steps.digests.outcome == 'failure' || steps.notion.outcome == 'failure' || steps.operations.outcome == 'failure'
+        run: exit 1

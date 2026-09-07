@@ -18,6 +18,7 @@ class SmtpTests(unittest.TestCase):
     @patch("trackr_app.emailing.smtplib.SMTP")
     def test_send_email_uses_starttls_login_html_and_stable_message_id(self, smtp):
         client = MagicMock()
+        client.send_message.return_value = {}
         smtp.return_value.__enter__.return_value = client
         with patch("trackr_app.emailing.settings", self.settings):
             first = send_email("person@example.com", "Subject", "<b>Hello</b>", "stable-key")

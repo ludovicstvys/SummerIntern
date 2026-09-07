@@ -159,14 +159,18 @@ def test_disabled_account_never_sends(db, user, offer, mode, worker):
 def test_smtp_failure_retries_and_exhausts(db, user, offer):
     delivery = Delivery(user_id=user.id, offer_id=offer.id, mode='immediate'); db.add(delivery); db.commit()
     with patch('trackr_app.workers.send_email', side_effect=RuntimeError('secret')) as send:
-        for _ in range(6): process_immediate_alerts(db)
+        for _ in range(6):
+            delivery.next_attempt_at = utcnow() - timedelta(seconds=1)
+            db.commit()
+            process_immediate_alerts(db)
     db.refresh(delivery)
     assert send.call_count == 5 and delivery.status == 'failed' and delivery.attempts == 5
     assert delivery.last_error == 'RuntimeError'
 
 
-def test_stale_processing_claim_is_retried(db, user, offer):
-    delivery = Delivery(user_id=user.id, offer_id=offer.id, mode='immediate', status='processing', processing_started_at=utcnow()-timedelta(minutes=20)); db.add(delivery); db.commit()
+@pytest.mark.parametrize('missing_timestamp', [False, True])
+def test_stale_processing_claim_is_retried(db, user, offer, missing_timestamp):
+    delivery = Delivery(user_id=user.id, offer_id=offer.id, mode='immediate', status='processing', processing_started_at=None if missing_timestamp else utcnow()-timedelta(minutes=20)); db.add(delivery); db.commit()
     with patch('trackr_app.workers.send_email', return_value='message'):
         assert process_immediate_alerts(db) == 1
     assert delivery.status == 'sent'
