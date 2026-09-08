@@ -335,3 +335,51 @@ def test_password_limit_applies_across_distinct_addresses(auth_env):
         assert verify.call_count == 50
         client.post('/auth/login', data={**data, 'email': 'member@example.com'}, follow_redirects=False)
         assert verify.call_count == 50
+
+
+@pytest.mark.parametrize('flow', ['reset', 'setup'])
+@pytest.mark.parametrize('app_url,origin,host', [
+    ('http://localhost:8000', 'http://127.0.0.1:8000', '127.0.0.1:8000'),
+    ('https://canonical.example', 'https://preview.example', 'preview.example'),
+    ('https://canonical.example', 'https://PREVIEW.example:443', 'preview.example'),
+])
+def test_first_password_accepts_same_site_alias_behind_proxy(auth_env, app_url, origin, host, flow):
+    client, factory, user_id = auth_env
+    with factory() as db:
+        db.get(User, user_id).password_hash = None
+        db.commit()
+    path = issue_token(factory, user_id)
+    if flow == 'setup':
+        seed_session(factory, user_id, utcnow())
+        client.cookies.set('trackr_session', 'persistent')
+        path = '/auth/password'
+    data = auth_form(client, password=PASSWORD, confirmation=PASSWORD)
+    with patch('trackr_app.auth.settings', SimpleNamespace(app_url=app_url)):
+        response = client.post(path, data=data, headers={'origin': origin, 'host': host}, follow_redirects=False)
+    # TestClient scopes its cookie to testserver; the explicit Host header leaves
+    # the URL/cookie jar unchanged while exercising ASGI request authority.
+    assert response.headers['location'] == '/dashboard'
+    with factory() as db:
+        assert passwords.verify(PASSWORD, db.get(User, user_id).password_hash)
+
+
+@pytest.mark.parametrize('origin', ['https://attacker.example', 'null', 'https://preview.example.attacker.example',
+                                    'https://preview.example:444', 'https://user@preview.example', 'http://preview.example'])
+def test_alias_origin_still_rejects_foreign_or_invalid_origins(auth_env, origin):
+    client, factory, user_id = auth_env
+    path = issue_token(factory, user_id)
+    data = auth_form(client, password=PASSWORD, confirmation=PASSWORD)
+    with patch('trackr_app.auth.settings', SimpleNamespace(app_url='https://canonical.example')):
+        response = client.post(path, data=data, headers={'origin': origin, 'host': 'preview.example',
+            'x-forwarded-host': 'attacker.example'}, follow_redirects=False)
+    assert response.status_code == 403
+    with factory() as db:
+        assert db.query(PasswordToken).one().used_at is None
+
+
+def test_same_origin_alias_still_requires_csrf(auth_env):
+    client, _, _ = auth_env
+    with patch('trackr_app.auth.settings', SimpleNamespace(app_url='https://canonical.example')):
+        response = client.post('/auth/login', data={'email': 'member@example.com', 'password': PASSWORD},
+            headers={'origin': 'https://preview.example', 'host': 'preview.example'})
+    assert response.status_code == 403

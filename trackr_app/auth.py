@@ -49,11 +49,35 @@ class AuthFormError(HTTPException):
     pass
 
 
+def normalized_origin(value):
+    """Compare browser origins, including equivalent explicit default ports."""
+    try:
+        parsed = urlsplit(value)
+        if (parsed.scheme not in ('http', 'https') or not parsed.hostname or
+                parsed.username is not None or parsed.password is not None or
+                parsed.path not in ('', '/') or parsed.query or parsed.fragment):
+            return None
+        return (parsed.scheme, parsed.hostname.lower(), parsed.port or (443 if parsed.scheme == 'https' else 80))
+    except (ValueError, TypeError):
+        return None
+
+
+def valid_form_origin(request, origin):
+    configured = urlsplit(settings.app_url)
+    canonical = normalized_origin(f'{configured.scheme}://{configured.netloc}')
+    # APP_URL controls email links, but a browser may use another application alias.
+    # Compare against the actual request authority, never arbitrary forwarded-host
+    # headers. HTTPS APP_URL also accounts for TLS termination at the reverse proxy.
+    scheme = 'https' if configured.scheme == 'https' else request.url.scheme
+    served = normalized_origin(f'{scheme}://{request.url.netloc}')
+    candidate = normalized_origin(origin)
+    return candidate is not None and candidate in (canonical, served)
+
+
 def check_form(request, value):
     cookie = request.cookies.get(FORM_COOKIE, '')
     origin = request.headers.get('origin')
-    configured = urlsplit(settings.app_url)
-    if origin and origin != f'{configured.scheme}://{configured.netloc}':
+    if origin is not None and not valid_form_origin(request, origin):
         raise AuthFormError(403, 'Invalid form origin. Please reopen the form.')
     try:
         # The cookie identifies the browser; each rendered form has its own hour.
