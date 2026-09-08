@@ -1,4 +1,4 @@
-from tests.auth_helpers import auth_form
+from tests.auth_helpers import auth_form, consume
 
 import unittest
 from datetime import timedelta
@@ -34,7 +34,7 @@ class WebAuthTests(unittest.TestCase):
         app.dependency_overrides.clear()
         self.engine.dispose()
 
-    @patch("trackr_app.main.send_magic_link")
+    @patch("trackr_app.auth_mail.send_magic_link")
     def test_unknown_email_is_not_enumerated(self, send):
         response = self.client.post("/auth/request", data=auth_form(self.client, email="unknown@example.com"), follow_redirects=False)
         self.assertEqual(response.status_code, 303)
@@ -46,7 +46,8 @@ class WebAuthTests(unittest.TestCase):
         with self.Session() as db:
             db.add(MagicLink(user_id=self.user_id, token_hash=token_hash(raw), expires_at=utcnow() + timedelta(minutes=15)))
             db.commit()
-        first = self.client.get(f"/auth/consume/{raw}", follow_redirects=False)
+        self.assertEqual(self.client.get(f"/auth/consume/{raw}").status_code, 200)
+        first = consume(self.client, f"/auth/consume/{raw}", follow_redirects=False)
         second = self.client.get(f"/auth/consume/{raw}", follow_redirects=False)
         self.assertEqual(first.status_code, 303)
         self.assertIn("trackr_session", first.cookies)
@@ -64,5 +65,5 @@ class WebAuthTests(unittest.TestCase):
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["database"], "ok")
-        self.assertEqual(response.json()["schema"], "20260907_0005")
+        self.assertEqual(response.json()["schema"], "20260908_0006")
         self.assertIn("commit", response.json())

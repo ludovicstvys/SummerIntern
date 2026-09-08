@@ -7,7 +7,7 @@ from urllib.parse import quote
 from zoneinfo import available_timezones
 
 from email_validator import EmailNotValidError, validate_email
-from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -25,9 +25,11 @@ from .preferences import PROGRAM_TYPES, REGIONS, activate_preference, matching_o
 from .opportunities import browse_opportunities, opportunity_card, relevant_sources
 from .operations import insert_for, error_code
 from .invitations import deliver_invitation
-from .security import expires_in, new_token, token_hash
+from .security import token_hash
 from .limits import allow_login
-from .auth import router as auth_router, auth_page, check_form, client_ip
+from .auth import (router as auth_router, auth_page, check_form, client_ip, AuthFormError,
+                   login_redirect, login_required, limited_response, RECOVERY_MESSAGE, RETURN_COOKIE)
+from .auth_mail import enqueue, deliver_in_background
 from .sessions import current_user, create_session, set_session_cookie, session_headers, valid_session, revoke_user_auth
 from .health import SCHEMA_REVISION
 
@@ -63,10 +65,20 @@ templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
 signer = URLSafeTimedSerializer(settings.secret_key, salt="notion-oauth")
 
 
+@app.exception_handler(AuthFormError)
+async def auth_form_error(request: Request, exc: AuthFormError):
+    path = request.url.path
+    retry = '/login' if path in ('/auth/login', '/auth/request') else path
+    response = templates.TemplateResponse(request, 'auth_error.html', {
+        'request': request, 'user': None, 'message': exc.detail, 'retry': retry}, status_code=403)
+    return response
+
+
 def require_user(request: Request, db: Session = Depends(get_db)) -> User:
     user = current_user(request, db)
     if not user:
-        raise HTTPException(303, headers={"Location": "/login"})
+        response = login_required(request)
+        raise HTTPException(303, headers={key: value for key, value in response.headers.items() if key in ("location", "set-cookie")})
     return user
 
 
@@ -115,27 +127,33 @@ def login_page(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/auth/request")
-def request_link(request: Request, email: str = Form(...), form_token: str = Form(""), db: Session = Depends(get_db)):
+def request_link(request: Request, background_tasks: BackgroundTasks, email: str = Form(...), form_token: str = Form(""), db: Session = Depends(get_db)):
     check_form(request, form_token)
-    normalized = email.strip().lower()[:320]
-    ip = client_ip(request)
-    if not allow_login(db, normalized, ip):
-        return RedirectResponse("/login?message=" + quote("If the address is invited, a sign-in link is on its way."), 303)
-    user = db.scalar(select(User).where(User.email == normalized, User.is_active.is_(True)).with_for_update())
-    if user:
-        raw = new_token()
-        db.add(MagicLink(user_id=user.id, token_hash=token_hash(raw), expires_at=expires_in(15)))
-        db.commit()
-        url = f"{settings.app_url}/auth/consume/{raw}"
-        try:
-            send_magic_link(user.email, url)
-        except Exception as exc:
-            print(f"Magic link delivery failed: {error_code(exc)}")
-    return RedirectResponse("/login?message=" + quote("If the address is invited, a sign-in link is on its way."), 303)
+    normalized = email.strip().lower()
+    if len(normalized) > 320:
+        return RedirectResponse('/login?message=' + quote(RECOVERY_MESSAGE), 303)
+    if not allow_login(db, normalized, client_ip(request)):
+        return limited_response('/login')
+    job = enqueue(db, normalized, 'magic')
+    db.commit()
+    background_tasks.add_task(deliver_in_background, job.id, db.get_bind())
+    return RedirectResponse('/login?message=' + quote(RECOVERY_MESSAGE), 303)
 
 
 @app.get("/auth/consume/{raw}")
-def consume_link(raw: str, db: Session = Depends(get_db)):
+def consume_link_page(raw: str, request: Request, db: Session = Depends(get_db)):
+    link = db.scalar(select(MagicLink).where(MagicLink.token_hash == token_hash(raw)))
+    user = db.get(User, link.user_id) if link else None
+    if not link or link.used_at or link.expires_at.replace(tzinfo=link.expires_at.tzinfo or utcnow().tzinfo) <= utcnow() or not user or not user.is_active:
+        return RedirectResponse('/login?message=' + quote('This link is invalid or has expired.'), 303)
+    existing = current_user(request, db)
+    return auth_page(request, 'confirm_login.html', action='/auth/consume/' + raw,
+                     email=user.email, switching=bool(existing and existing.id != user.id))
+
+
+@app.post('/auth/consume/{raw}')
+def consume_link(raw: str, request: Request, form_token: str = Form(''), db: Session = Depends(get_db)):
+    check_form(request, form_token)
     link = db.scalar(select(MagicLink).where(MagicLink.token_hash == token_hash(raw)))
     if not link or link.used_at or link.expires_at.replace(tzinfo=link.expires_at.tzinfo or utcnow().tzinfo) <= utcnow():
         return RedirectResponse("/login?message=" + quote("This link is invalid or has expired."), 303)
@@ -151,14 +169,15 @@ def consume_link(raw: str, db: Session = Depends(get_db)):
     if invitation:
         invitation.accepted_at = utcnow()
     db.commit()
-    response = RedirectResponse("/auth/password" if not link_user.password_hash else "/dashboard", 303)
+    response = login_redirect(request, "/auth/password" if not link_user.password_hash else "/dashboard")
     set_session_cookie(response, *cookie)
     return response
 
 
 @app.post("/logout")
-def logout(request: Request, csrf_token: str = Form(...), db: Session = Depends(get_db)):
-    csrf(request, db, csrf_token)
+def logout(request: Request, csrf_token: str = Form(""), db: Session = Depends(get_db)):
+    if valid_session(request, db):
+        csrf(request, db, csrf_token)
     raw = request.cookies.get("trackr_session", "")
     session = db.scalar(select(UserSession).where(UserSession.token_hash == token_hash(raw)))
     if session:
@@ -166,6 +185,7 @@ def logout(request: Request, csrf_token: str = Form(...), db: Session = Depends(
         db.commit()
     response = RedirectResponse("/login", 303)
     response.delete_cookie("trackr_session")
+    response.delete_cookie(RETURN_COOKIE)
     return response
 
 

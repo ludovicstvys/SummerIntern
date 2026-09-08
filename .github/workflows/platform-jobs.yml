@@ -41,7 +41,7 @@ jobs:
         id: scrape
         continue-on-error: true
         run: timeout 210s python -m trackr_app.cli scrape-all
-      - name: Send invitations
+      - name: Send invitations and retry authentication emails
         id: invitations
         continue-on-error: true
         run: timeout 150s python -m trackr_app.cli process-invitations

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select, delete
 
 from .database import SessionLocal
-from .models import Delivery, NotionSync, Invitation, User, Preference, LegacyTask, UserSession, MagicLink, WorkerState, utcnow
+from .models import AuthMail, Delivery, NotionSync, Invitation, User, Preference, LegacyTask, UserSession, MagicLink, WorkerState, utcnow
 from .config import settings
 from .invitations import process_invitations
 from .operations import lock_state, insert_for
@@ -35,6 +35,15 @@ def run_command(command):
         statuses = dict(db.execute(select(status_column, func.count()).where(*filters).group_by(status_column)).all())
         print(json.dumps({"command": command, "completed": count, "deferred": statuses.get("pending", 0) + statuses.get("processing", 0), "failed": statuses.get("failed", 0), "errors_this_run": max(0, after - before)}), flush=True)
         failed = int(after > before or statuses.get("failed", 0) > 0)
+        if command == 'process-invitations':
+            auth_statuses = dict(db.execute(select(AuthMail.status, func.count()).where(
+                AuthMail.invitation_id.is_(None)).group_by(AuthMail.status)).all())
+            auth_errors = db.scalar(select(func.count()).select_from(AuthMail).where(
+                AuthMail.invitation_id.is_(None), AuthMail.status.in_(['pending', 'processing', 'failed']),
+                AuthMail.last_error.is_not(None)))
+            print(json.dumps({'auth_mail': auth_statuses, 'auth_mail_errors': auth_errors}), flush=True)
+            failed = int(failed or auth_errors or auth_statuses.get('failed', 0))
+
         state = lock_state(db, command)
         state.last_error = 'Processing errors' if failed else None
         if not failed:

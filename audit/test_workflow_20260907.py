@@ -1,4 +1,5 @@
 """Régressions corrigées de l'audit : services sortants simulés."""
+from tests.auth_helpers import auth_form
 from unittest.mock import Mock, patch
 
 import pytest
@@ -20,7 +21,7 @@ def test_invitation_login_activation_scrape_delivery_logout(client, db, user):
     assert target.preference.status == 'draft'
     url = mail.call_args.args[1]
     client.cookies.clear()
-    assert client.get('/auth/consume/' + url.rsplit('/', 1)[-1], follow_redirects=False).status_code == 303
+    assert client.post('/auth/consume/' + url.rsplit('/', 1)[-1], data=auth_form(client), follow_redirects=False).status_code == 303
     assert client.get('/dashboard').status_code == 200
     assert client.get('/admin').status_code == 403
     session = db.scalar(select(UserSession).where(UserSession.user_id == target.id))

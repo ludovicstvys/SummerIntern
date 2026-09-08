@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from tests.auth_helpers import auth_form
+from tests.auth_helpers import auth_form, consume
 from trackr_app.auth import passwords
 from trackr_app.database import Base, get_db
 from trackr_app.main import app
@@ -113,7 +113,7 @@ def test_login_limits_separate_from_email_limits(auth_env):
             client.post('/auth/login', data=data, follow_redirects=False)
         data['password'] = PASSWORD
         assert client.post('/auth/login', data=data, follow_redirects=False).headers['location'].startswith('/login?')
-        with patch('trackr_app.auth.send_password_link') as sender:
+        with patch('trackr_app.auth_mail.send_password_link') as sender:
             client.post('/auth/password/request', data=data, follow_redirects=False)
             assert sender.call_count == 1
     with factory() as db:
@@ -122,7 +122,7 @@ def test_login_limits_separate_from_email_limits(auth_env):
 
 def test_password_email_and_generic_response(auth_env):
     client, factory, user_id = auth_env
-    with patch('trackr_app.auth.send_password_link') as sender:
+    with patch('trackr_app.auth_mail.send_password_link') as sender:
         known = client.post('/auth/password/request', data=auth_form(client, email='member@example.com'), follow_redirects=False)
         unknown = client.post('/auth/password/request', data=auth_form(client, email='unknown@example.com'), follow_redirects=False)
         assert known.headers['location'] == unknown.headers['location']
@@ -133,18 +133,22 @@ def test_password_email_and_generic_response(auth_env):
         assert token.token_hash == token_hash(url.rsplit('/', 1)[-1])
         assert aware(token.expires_at) > utcnow() + timedelta(minutes=14)
         db.get(User, user_id).is_active = False; db.commit()
-    with patch('trackr_app.auth.send_password_link') as sender:
+    with patch('trackr_app.auth_mail.send_password_link') as sender:
         client.post('/auth/password/request', data=auth_form(client, email='member@example.com'))
         sender.assert_not_called()
 
 
 def test_mail_failure_is_generic_and_never_logs_token(auth_env, capsys):
     client, _, _ = auth_env
-    with patch('trackr_app.auth.send_password_link', side_effect=RuntimeError('secret-token')):
+    with patch('trackr_app.auth_mail.send_password_link', side_effect=RuntimeError('secret-token')):
         response = client.post('/auth/password/request', data=auth_form(client, email='member@example.com'), follow_redirects=False)
     assert response.status_code == 303
     output = capsys.readouterr().out
-    assert 'RuntimeError' in output and 'secret-token' not in output
+    assert 'secret-token' not in output
+    with auth_env[1]() as db:
+        from trackr_app.models import AuthMail
+        job = db.query(AuthMail).one()
+        assert job.status == 'pending' and job.last_error == 'RuntimeError'
 
 
 def test_reset_is_single_use_and_revokes_all_auth(auth_env):
@@ -218,7 +222,7 @@ def test_existing_invite_prompts_password_and_preserves_access(auth_env):
         db.add(Invitation(email='member@example.com', invited_by_id=user_id))
         db.add(MagicLink(user_id=user_id, token_hash=token_hash('invite'), expires_at=utcnow()+timedelta(minutes=15)))
         db.commit()
-    response = client.get('/auth/consume/invite', follow_redirects=False)
+    response = consume(client, '/auth/consume/invite', follow_redirects=False)
     assert response.headers['location'] == '/auth/password'
     assert 'Continue without setting a password' in client.get('/auth/password').text
     assert 'Set your password' in client.get('/dashboard').text
@@ -264,7 +268,7 @@ def test_invalid_sessions_never_renew(auth_env, age, idle, disabled):
     with patch('trackr_app.sessions.utcnow', return_value=now):
         response = client.get('/dashboard', follow_redirects=False)
     assert response.headers['location'] == '/login'
-    assert 'set-cookie' not in response.headers
+    assert 'trackr_session' not in response.cookies
     with factory() as db:
         assert db.query(UserSession).one().renewed_at is None
 

@@ -1,0 +1,8 @@
+{% extends "base.html" %}{% block title %}Confirm sign in · Trackr Alerts{% endblock %}
+{% block content %}<section class="auth-shell"><h1>Confirm sign in.</h1>
+<p>You are signing in as <strong>{{ email }}</strong>.</p>
+{% if switching %}<p role="alert">This will switch the account currently signed in on this browser. Continue only if this is your account.</p>{% endif %}
+<form class="panel auth-panel" action="{{ action }}" method="post">
+<input type="hidden" name="form_token" value="{{ form_token }}">
+<button class="primary">Confirm and sign in</button><a href="/login">Cancel</a>
+</form></section>{% endblock %}

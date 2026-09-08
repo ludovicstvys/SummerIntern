@@ -4,7 +4,7 @@ from datetime import timedelta, timezone
 from sqlalchemy import delete, or_, select, update
 
 from .config import settings
-from .models import MagicLink, PasswordToken, User, UserSession, utcnow
+from .models import AuthMail, MagicLink, PasswordToken, User, UserSession, utcnow
 from .security import new_token, token_hash
 
 COOKIE = 'trackr_session'
@@ -64,6 +64,10 @@ def set_session_cookie(response, raw, expiry):
 
 
 def revoke_user_auth(db, user_id):
+    user = db.get(User, user_id)
+    if user:
+        db.execute(update(AuthMail).where(AuthMail.email_hash == token_hash(user.email),
+                   AuthMail.status.in_(['pending', 'processing'])).values(status='cancelled'))
     for model in (UserSession, MagicLink, PasswordToken):
         db.execute(delete(model).where(model.user_id == user_id))
 
@@ -75,7 +79,7 @@ async def session_headers(request, call_next):
     owns_cookie = any(value.startswith(COOKIE + '=') for value in response.headers.getlist('set-cookie'))
     if renewal and not owns_cookie:
         set_session_cookie(response, *renewal)
-    if request.url.path.startswith(('/auth/', '/login')) or request.cookies.get(COOKIE):
+    if request.url.path.startswith(('/auth/', '/login')) or request.cookies.get(COOKIE) or response.headers.getlist('set-cookie'):
         response.headers['Cache-Control'] = 'no-store'
         response.headers['Referrer-Policy'] = 'no-referrer'
     return response

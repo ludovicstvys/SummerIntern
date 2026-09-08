@@ -88,24 +88,25 @@ def test_invalid_time_is_form_error(client, user, path, value):
 
 
 def test_login_limits_apply_to_known_and_unknown_addresses(client, db, user):
-    with patch('trackr_app.main.send_magic_link') as send:
+    with patch('trackr_app.auth_mail.send_magic_link') as send:
         responses = [client.post('/auth/request', data=auth_form(client, email=user.email), follow_redirects=False) for _ in range(3)]
         unknown = client.post('/auth/request', data=auth_form(client, email='unknown@example.com'), follow_redirects=False)
     assert send.call_count == 1
-    assert all(response.headers['location'] == unknown.headers['location'] for response in responses)
+    assert responses[0].headers['location'] == unknown.headers['location']
+    assert all(response.headers.get('Retry-After') == '900' for response in responses[1:])
     assert db.query(MagicLink).count() == 1
 
 
 def test_ip_limit_covers_distinct_invited_addresses(client, db):
     for i in range(21): db.add(User(email=f'p{i}@example.com'))
     db.commit()
-    with patch('trackr_app.main.send_magic_link') as send:
+    with patch('trackr_app.auth_mail.send_magic_link') as send:
         for i in range(21): client.post('/auth/request', data=auth_form(client, email=f'p{i}@example.com'))
     assert send.call_count == 20
 
 
 def test_production_logs_never_include_magic_link(client, user, capsys):
-    with patch('trackr_app.main.settings', SimpleNamespace(app_url='https://example.com', is_production=True)), patch('trackr_app.main.send_magic_link', side_effect=RuntimeError('secret-url')):
+    with patch('trackr_app.main.settings', SimpleNamespace(app_url='https://example.com', is_production=True)), patch('trackr_app.auth_mail.send_magic_link', side_effect=RuntimeError('secret-url')):
         client.post('/auth/request', data=auth_form(client, email=user.email))
     output = capsys.readouterr().out
     assert 'secret-url' not in output and '/auth/consume/' not in output

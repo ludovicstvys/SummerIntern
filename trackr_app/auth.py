@@ -5,7 +5,7 @@ from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
@@ -15,11 +15,10 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import get_db
-from .emailing import send_password_link
-from .limits import allow_login, allow_password_login
+from .auth_mail import enqueue, deliver_in_background
+from .limits import allow_login, reserve_password_login, refund_password_login
 from .models import Invitation, PasswordToken, User, utcnow
-from .operations import error_code
-from .security import expires_in, new_token, token_hash
+from .security import new_token, token_hash
 from .sessions import aware, create_session, current_user, revoke_user_auth, set_session_cookie, valid_session
 
 router = APIRouter()
@@ -28,7 +27,11 @@ passwords = PasswordHash.recommended()
 DUMMY_HASH = passwords.hash(new_token())
 form_signer = URLSafeTimedSerializer(settings.secret_key, salt='auth-form')
 FORM_COOKIE = 'trackr_auth_csrf'
-RECOVERY_MESSAGE = 'If the address is invited, a password setup or reset link is on its way.'
+RECOVERY_MESSAGE = 'Request received. If the address is invited, we will email a link. Delivery may take a few minutes.'
+LIMIT_MESSAGE = 'Too many requests. Please try again in 15 minutes.'
+return_signer = URLSafeTimedSerializer(settings.secret_key, salt='auth-return')
+RETURN_COOKIE = 'trackr_return'
+RETURN_PATHS = {'/dashboard', '/preferences', '/admin', '/notion/setup', '/notion/connect'}
 INVALID_LINK = 'This link is invalid or has expired. Please request a new one.'
 
 
@@ -42,30 +45,75 @@ def client_ip(request):
     return ip
 
 
+class AuthFormError(HTTPException):
+    pass
+
+
 def check_form(request, value):
     cookie = request.cookies.get(FORM_COOKIE, '')
     origin = request.headers.get('origin')
     configured = urlsplit(settings.app_url)
     if origin and origin != f'{configured.scheme}://{configured.netloc}':
-        raise HTTPException(403, 'Invalid form origin')
-    if not value or not cookie or not hmac.compare_digest(value.encode(), cookie.encode()):
-        raise HTTPException(403, 'Invalid CSRF token')
+        raise AuthFormError(403, 'Invalid form origin. Please reopen the form.')
     try:
-        form_signer.loads(value, max_age=3600)
-    except BadSignature:
-        raise HTTPException(403, 'Expired form. Please reload the page.')
+        # The cookie identifies the browser; each rendered form has its own hour.
+        browser = form_signer.loads(cookie)
+        submitted = form_signer.loads(value, max_age=3600)
+        if not isinstance(browser, str) or not isinstance(submitted, str) or not hmac.compare_digest(browser, submitted):
+            raise BadSignature('Browser mismatch')
+    except (BadSignature, TypeError):
+        raise AuthFormError(403, 'This form has expired or is invalid. Please reopen it and try again.')
 
 
 def auth_page(request, template, **context):
-    token = request.cookies.get(FORM_COOKIE)
+    cookie = request.cookies.get(FORM_COOKIE, '')
     try:
-        form_signer.loads(token or '', max_age=3600)
+        browser = form_signer.loads(cookie)
+        if not isinstance(browser, str):
+            raise BadSignature('Invalid browser')
     except BadSignature:
-        token = form_signer.dumps(new_token())
+        browser = new_token()
+        cookie = form_signer.dumps(browser)
+    token = form_signer.dumps(browser)
     response = templates.TemplateResponse(request, template, {
         'request': request, 'user': None, 'form_token': token, **context})
-    response.set_cookie(FORM_COOKIE, token, httponly=True, secure=settings.app_url.startswith('https'),
+    response.set_cookie(FORM_COOKIE, cookie, httponly=True, secure=settings.app_url.startswith('https'),
                         samesite='lax', max_age=3600, path='/')
+    return response
+
+
+def safe_destination(value):
+    if not isinstance(value, str) or len(value) > 2048 or any(ord(c) < 32 for c in value) or '\\' in value:
+        return '/dashboard'
+    parsed = urlsplit(value)
+    return value if not parsed.scheme and not parsed.netloc and parsed.path in RETURN_PATHS else '/dashboard'
+
+
+def login_redirect(request, default='/dashboard'):
+    destination = default
+    if default == '/dashboard':
+        try:
+            destination = safe_destination(return_signer.loads(request.cookies.get(RETURN_COOKIE, ''), max_age=3600))
+        except BadSignature:
+            pass
+    response = RedirectResponse(destination, 303)
+    if default == '/dashboard':
+        response.delete_cookie(RETURN_COOKIE)
+    return response
+
+
+def login_required(request):
+    response = RedirectResponse('/login', 303)
+    if request.method == 'GET' and request.url.path in RETURN_PATHS:
+        path = request.url.path + ('?' + request.url.query if request.url.query else '')
+        response.set_cookie(RETURN_COOKIE, return_signer.dumps(safe_destination(path)),
+            httponly=True, secure=settings.app_url.startswith('https'), samesite='lax', max_age=3600, path='/')
+    return response
+
+
+def limited_response(path):
+    response = redirect_message(path, LIMIT_MESSAGE)
+    response.headers['Retry-After'] = '900'
     return response
 
 
@@ -81,14 +129,14 @@ def password_error(password, confirmation):
     return None
 
 
-def finish_password(db, user, password):
+def finish_password(db, user, password, request):
     user.password_hash = passwords.hash(password)
     revoke_user_auth(db, user.id)
     db.execute(update(Invitation).where(Invitation.email == user.email,
                Invitation.accepted_at.is_(None)).values(accepted_at=utcnow()))
     cookie = create_session(db, user.id)
     db.commit()
-    response = RedirectResponse('/dashboard', 303)
+    response = login_redirect(request)
     set_session_cookie(response, *cookie)
     return response
 
@@ -99,16 +147,20 @@ def password_login(request: Request, email: str = Form(...), password: str = For
     check_form(request, form_token)
     email = email.strip().lower()
     failure = 'Incorrect email or password.'
-    if len(email) > 320 or not allow_password_login(db, email, client_ip(request)):
+    if len(email) > 320:
         return redirect_message('/login', failure)
+    allowed, reservation = reserve_password_login(db, email, client_ip(request))
+    if not allowed:
+        return limited_response('/login')
     user = db.scalar(select(User).where(User.email == email).with_for_update())
     candidate = user.password_hash if user and user.is_active and user.password_hash else DUMMY_HASH
     verified = passwords.verify(password if len(password) <= 128 else '', candidate)
     if not verified or not user or not user.is_active or not user.password_hash or not 12 <= len(password) <= 128:
         return redirect_message('/login', failure)
+    refund_password_login(db, reservation)
     cookie = create_session(db, user.id)
     db.commit()
-    response = RedirectResponse('/dashboard', 303)
+    response = login_redirect(request)
     set_session_cookie(response, *cookie)
     return response
 
@@ -119,24 +171,18 @@ def password_request_page(request: Request):
 
 
 @router.post('/auth/password/request')
-def password_request(request: Request, email: str = Form(...), form_token: str = Form(''),
+def password_request(request: Request, background_tasks: BackgroundTasks, email: str = Form(...), form_token: str = Form(''),
                      db: Session = Depends(get_db)):
     check_form(request, form_token)
     email = email.strip().lower()
     response = redirect_message('/auth/password/request', RECOVERY_MESSAGE)
-    if len(email) > 320 or not allow_login(db, email, client_ip(request)):
+    if len(email) > 320:
         return response
-    user = db.scalar(select(User).where(User.email == email, User.is_active.is_(True)).with_for_update())
-    if user:
-        raw = new_token()
-        token = PasswordToken(user_id=user.id, token_hash=token_hash(raw), expires_at=expires_in(15))
-        db.add(token)
-        # Commit before delivery, so a received link always has a persisted record.
-        db.commit()
-        try:
-            send_password_link(user.email, f'{settings.app_url}/auth/password/reset/{raw}')
-        except Exception as exc:
-            print(f'Password link delivery failed: {error_code(exc)}')
+    if not allow_login(db, email, client_ip(request)):
+        return limited_response('/auth/password/request')
+    job = enqueue(db, email, 'password')
+    db.commit()
+    background_tasks.add_task(deliver_in_background, job.id, db.get_bind())
     return response
 
 
@@ -173,7 +219,7 @@ def password_reset(raw: str, request: Request, password: str = Form(...), confir
     if consumed.rowcount != 1:
         db.rollback()
         return redirect_message('/auth/password/request', INVALID_LINK)
-    return finish_password(db, user, password)
+    return finish_password(db, user, password, request)
 
 
 @router.get('/auth/password')
@@ -200,4 +246,11 @@ def password_setup(request: Request, password: str = Form(...), confirmation: st
     error = password_error(password, confirmation)
     if error:
         return auth_page(request, 'password_form.html', action='/auth/password', setup=True, error=error)
-    return finish_password(db, user, password)
+    return finish_password(db, user, password, request)
+
+
+@router.get('/auth/continue')
+def continue_after_setup(request: Request, db: Session = Depends(get_db)):
+    if not current_user(request, db):
+        return RedirectResponse('/login', 303)
+    return login_redirect(request)

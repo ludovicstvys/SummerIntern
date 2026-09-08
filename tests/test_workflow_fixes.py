@@ -71,12 +71,12 @@ def test_failed_invitation_retries_with_fresh_link(client, db):
         client.post('/admin/invite', data={'csrf_token': 'csrf', 'email': 'retry@example.com'})
     invitation = db.query(Invitation).one()
     assert invitation.delivery_status == 'pending' and invitation.attempts == 1
-    assert db.query(MagicLink).count() == 0
+    assert db.query(MagicLink).count() == 1  # SMTP acceptance may be uncertain.
     invitation.next_attempt_at = utcnow() - timedelta(seconds=1); db.commit()
     with patch('trackr_app.invitations.send_magic_link') as send:
         assert process_invitations(db) == 1
     assert send.call_count == 1 and invitation.delivery_status == 'sent'
-    assert db.query(MagicLink).count() == 1
+    assert db.query(MagicLink).count() == 2
 
 
 def test_disabled_invitation_is_cancelled(db, user):

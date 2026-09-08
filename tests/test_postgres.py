@@ -43,7 +43,7 @@ def pg():
 
 def test_postgres_migrations_match_models(pg):
     with pg.connect() as connection:
-        assert connection.scalar(text('select version_num from alembic_version')) == '20260907_0005'
+        assert connection.scalar(text('select version_num from alembic_version')) == '20260908_0006'
     with pg.begin() as connection:
         config = Config('alembic.ini'); config.attributes['connection'] = connection
         command.check(config)
@@ -255,3 +255,96 @@ def test_postgres_session_renewal_is_atomic(pg):
     assert sum(results) == 1
     with Session() as db:
         assert aware(db.query(UserSession).one().expires_at) == now+timedelta(days=90)
+
+
+def test_postgres_auth_mail_workers_send_once_with_persisted_token(pg):
+    from sqlalchemy import select
+    from trackr_app.auth_mail import enqueue, process_auth_mail
+    from trackr_app.models import AuthMail, PasswordToken
+    from trackr_app.security import token_hash
+    Session = sessionmaker(bind=pg, expire_on_commit=False)
+    with Session() as db:
+        db.add(User(email='queue@example.com')); db.flush()
+        job = enqueue(db, 'queue@example.com', 'password'); db.commit()
+        job_id = job.id
+    entered, release = Event(), Event()
+    def sender(email, url):
+        with Session() as verification:
+            assert verification.scalar(select(PasswordToken).where(
+                PasswordToken.token_hash == token_hash(url.rsplit('/', 1)[-1]))) is not None
+        entered.set()
+        assert release.wait(10)
+    def process():
+        with Session() as db:
+            return process_auth_mail(db, job_id, sender=sender)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(process)
+        try:
+            assert entered.wait(10)
+            second = pool.submit(process)
+        finally:
+            release.set()
+        assert sorted([first.result(timeout=10), second.result(timeout=10)]) == [False, True]
+    with Session() as db:
+        assert db.query(PasswordToken).count() == 1
+        assert db.get(AuthMail, job_id).status == 'sent'
+
+
+def test_postgres_revocation_between_token_commit_and_send_cancels_delivery(pg):
+    from trackr_app.auth_mail import enqueue, process_auth_mail
+    from trackr_app.models import AuthMail, PasswordToken
+    from trackr_app.sessions import revoke_user_auth
+    Session = sessionmaker(bind=pg, expire_on_commit=False)
+    with Session() as db:
+        user = User(email='revoke-queue@example.com'); db.add(user); db.flush()
+        user_id = user.id
+        job = enqueue(db, user.email, 'password'); db.commit()
+        job_id = job.id
+    with Session() as db:
+        original_commit = db.commit
+        revoked = False
+        def commit_then_revoke():
+            nonlocal revoked
+            original_commit()
+            if not revoked:
+                revoked = True
+                with Session() as revocation:
+                    revocation.get(User, user_id, with_for_update=True)
+                    revoke_user_auth(revocation, user_id)
+                    revocation.commit()
+        with patch.object(db, 'commit', side_effect=commit_then_revoke), patch('trackr_app.auth_mail.send_password_link') as sender:
+            assert not process_auth_mail(db, job_id)
+        sender.assert_not_called()
+    with Session() as db:
+        assert db.query(PasswordToken).count() == 0
+        assert db.get(AuthMail, job_id).status == 'cancelled'
+
+
+def test_postgres_auth_mail_failed_status_commit_retains_delivered_token(pg):
+    from sqlalchemy import select
+    from trackr_app.auth_mail import enqueue, process_auth_mail
+    from trackr_app.models import PasswordToken
+    from trackr_app.security import token_hash
+    Session = sessionmaker(bind=pg, expire_on_commit=False)
+    with Session() as db:
+        db.add(User(email='commit-queue@example.com')); db.flush()
+        job = enqueue(db, 'commit-queue@example.com', 'password'); db.commit()
+        job_id = job.id
+    delivered = []
+    with Session() as db:
+        original_commit = db.commit
+        calls = 0
+        def commit():
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError('database unavailable after SMTP')
+            original_commit()
+        with patch.object(db, 'commit', side_effect=commit):
+            with pytest.raises(RuntimeError):
+                process_auth_mail(db, job_id, sender=lambda email, url: delivered.append(url))
+        db.rollback()
+    assert len(delivered) == 1
+    with Session() as db:
+        assert db.scalar(select(PasswordToken).where(
+            PasswordToken.token_hash == token_hash(delivered[0].rsplit('/', 1)[-1]))) is not None

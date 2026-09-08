@@ -37,6 +37,22 @@ class Invitation(Base):
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class AuthMail(Base):
+    """Durable requests, including unknown addresses; resolved only by the worker."""
+    __tablename__ = 'auth_mail'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email_encrypted: Mapped[str] = mapped_column(Text)
+    email_hash: Mapped[str] = mapped_column(String(64), index=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    invitation_id: Mapped[int | None] = mapped_column(ForeignKey('invitations.id'), unique=True)
+    status: Mapped[str] = mapped_column(String(20), default='pending', index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    processing_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class MagicLink(Base):
     __tablename__ = "magic_links"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
