@@ -1,4 +1,4 @@
-"""Build once, verify candidate, stage the schema bridge, migrate and promote."""
+"""Deploy a remote-built candidate, verify it, migrate, then promote it."""
 import json
 import os
 from pathlib import Path
@@ -38,7 +38,7 @@ def previous():
 def release():
     rollback_url, old = previous()
     rollback_commit = old['commit']
-    candidate = vercel('deploy', '--prebuilt', '--prod', '--skip-domain', '--yes',
+    candidate = vercel('deploy', '--prod', '--skip-domain', '--yes',
         '--env', 'APP_COMMIT=' + os.environ['GITHUB_SHA'], '--env', 'ALLOW_DEPLOYMENT_HOST=true').splitlines()[-1]
     if not candidate.startswith('https://') or not candidate.endswith('.vercel.app'):
         raise RuntimeError('Invalid candidate deployment URL')

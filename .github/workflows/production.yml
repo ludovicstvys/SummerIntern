@@ -89,11 +89,7 @@ jobs:
         run: python -c "from trackr_app.config import settings; settings.validate()"
       - name: Synchronize web configuration
         run: python scripts/configure_vercel.py
-      - name: Build production artifact from CI project context
-        run: vercel build --prod --token="$VERCEL_TOKEN"
-      - name: Check artifact privacy
-        run: python scripts/check_artifact.py .vercel/output
-      - name: Verify candidate, bridge, migrate, promote and verify rollback on failure
+      - name: Deploy remote-built candidate, migrate, promote and verify rollback on failure
         run: python scripts/release.py
       - name: Restore worker schedules after runner failure
         if: always()
