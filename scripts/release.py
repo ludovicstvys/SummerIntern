@@ -1,4 +1,4 @@
-"""Deploy a remote-built candidate, verify it, migrate, then promote it."""
+"""Deploy the compatible web bridge, migrate, then verify production."""
 import json
 import os
 from pathlib import Path
@@ -10,7 +10,6 @@ from scripts.deployment_status import verify, request
 from scripts.worker_schedules import pause, resume
 from scripts.migrate_coordinated import migrate
 from trackr_app.config import settings
-from trackr_app.health import SCHEMA_REVISION
 from sqlalchemy import create_engine
 from sqlalchemy.pool import NullPool
 
@@ -37,21 +36,11 @@ def previous():
 
 
 def release():
-    rollback_url, old = previous()
-    rollback_commit = old['commit']
-    candidate = vercel('deploy', '--prod', '--skip-domain', '--yes',
+    previous()
+    vercel('deploy', '--prod', '--yes',
         '--env', 'APP_COMMIT=' + os.environ['GITHUB_SHA'], '--env', 'ALLOW_DEPLOYMENT_HOST=true').splitlines()[-1]
-    if not candidate.startswith('https://') or not candidate.endswith('.vercel.app'):
-        raise RuntimeError('Invalid candidate deployment URL')
-    verify(candidate, candidate=True)
-    promoted = False
     try:
-        if SCHEMA_REVISION not in old.get('compatible_schemas', []):
-            # The original strict-0006 release must leave service before 0007.
-            promoted = True
-            vercel('promote', candidate, '--yes')
-            verify(settings.app_url)
-            rollback_url, rollback_commit = candidate, os.environ['GITHUB_SHA']
+        verify(settings.app_url)
         pause()  # Also drains old worker versions that predate the database gate.
         if not settings.migration_database_url:
             raise RuntimeError('MIGRATION_DATABASE_URL is required')
@@ -61,18 +50,7 @@ def release():
             migrate(engine)
         finally:
             engine.dispose()
-        verify(candidate, candidate=True)
-        promoted = True
-        vercel('promote', candidate, '--yes')
         verify(settings.app_url)
-    except Exception:
-        # A compatibility bridge is already the production deployment. Rolling it
-        # back to itself is both unnecessary and rejected by the Vercel CLI; keep
-        # it live so it can serve either schema while surfacing the root failure.
-        if promoted and rollback_url != candidate:
-            vercel('rollback', rollback_url, '--yes')
-        verify(settings.app_url, rollback_commit)
-        raise
     finally:
         resume()
 
