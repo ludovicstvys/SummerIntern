@@ -66,7 +66,10 @@ def release():
         vercel('promote', candidate, '--yes')
         verify(settings.app_url)
     except Exception:
-        if promoted:
+        # A compatibility bridge is already the production deployment. Rolling it
+        # back to itself is both unnecessary and rejected by the Vercel CLI; keep
+        # it live so it can serve either schema while surfacing the root failure.
+        if promoted and rollback_url != candidate:
             vercel('rollback', rollback_url, '--yes')
         verify(settings.app_url, rollback_commit)
         raise

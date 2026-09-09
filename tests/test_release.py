@@ -31,7 +31,6 @@ def test_bridge_is_verified_before_migration_and_is_safe_rollback(monkeypatch):
     deploy = next(args for kind, args in events if kind == 'vercel' and args[0] == 'deploy')
     assert '--prebuilt' not in deploy
     assert '--prod' in deploy and '--skip-domain' in deploy
-    assert ('vercel', ('rollback', candidate, '--yes')) in events
     assert ('verify', 'https://canonical.example', 'new-commit', False) in events
     assert events[-1] == ('resume',)
 
