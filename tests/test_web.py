@@ -65,5 +65,5 @@ class WebAuthTests(unittest.TestCase):
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["database"], "ok")
-        self.assertEqual(response.json()["schema"], "20260908_0006")
+        self.assertEqual(response.json()["schema"], "20260909_0007")
         self.assertIn("commit", response.json())

@@ -1,3 +1,4 @@
+import ssl
 from html import escape
 from email.message import EmailMessage
 from email.utils import formatdate
@@ -71,7 +72,7 @@ def send_email(to: str, subject: str, html: str, idempotency_key: str) -> str:
     message.add_alternative(html, subtype="html")
     with smtplib.SMTP(settings.smtp_server, settings.smtp_port, timeout=30) as client:
         client.ehlo()
-        client.starttls()
+        client.starttls(context=ssl.create_default_context())
         client.ehlo()
         client.login(settings.smtp_user, settings.smtp_password)
         refused = client.send_message(message)

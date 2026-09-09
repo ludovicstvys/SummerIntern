@@ -1,7 +1,7 @@
 """Invitation delivery uses the same durable queue as public auth requests."""
 import time
 from sqlalchemy import select, or_
-from .auth_mail import enqueue, process_auth_mail, process_auth_queue
+from .auth_mail import enqueue, process_auth_mail
 from .emailing import send_magic_link
 from .models import AuthMail, Invitation, User, utcnow
 
@@ -45,5 +45,16 @@ def process_invitations(db):
     for invitation_id in ids:
         if time.monotonic() >= deadline:
             break
-        count += deliver_invitation(db, invitation_id)
-    return count + process_auth_queue(db, deadline)
+        try:
+            count += deliver_invitation(db, invitation_id)
+        except Exception as exc:
+            db.rollback()
+            from .operations import error_code, next_retry
+            from sqlalchemy import update, case
+            db.execute(update(Invitation).where(Invitation.id == invitation_id,
+                Invitation.delivery_status == 'pending').values(
+                attempts=Invitation.attempts + 1,
+                delivery_status=case((Invitation.attempts >= 4, 'failed'), else_='pending'),
+                last_error=error_code(exc), next_attempt_at=next_retry(5)))
+            db.commit()
+    return count

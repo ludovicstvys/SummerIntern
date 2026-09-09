@@ -5,10 +5,12 @@ on:
     paths-ignore: ["processus_ouverts*.csv"]
   workflow_dispatch:
 concurrency:
-  group: trackr-production-state
+  group: trackr-deployment
+  queue: max
   cancel-in-progress: false
 permissions:
   contents: read
+  actions: write
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -35,20 +37,28 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install -r requirements-dev.txt
+      - run: python -m pip_audit -r requirements.lock --no-deps --disable-pip
       - run: python -m pip check
       - run: python -m compileall -q trackr_app api scripts
       - run: python -m pytest -q
   deploy:
     needs: test
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 40
     environment: production
     env:
+      GH_TOKEN: ${{ github.token }}
+      VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.VERCEL_AUTOMATION_BYPASS_SECRET }}
+      ALLOW_DEPLOYMENT_HOST: 'true'
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN || secrets.VERCEL_BOOTSTRAP_TOKEN }}
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
       NOTION_SYNC_ENABLED: ${{ vars.NOTION_SYNC_ENABLED || 'false' }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      APP_URL: ${{ vars.APP_URL || 'https://trackr-alerts.vercel.app' }}
+      ALLOWED_HOSTS: ${{ vars.ALLOWED_HOSTS }}
+      AUTH_ALLOWED_ORIGINS: ${{ vars.AUTH_ALLOWED_ORIGINS }}
       SECRET_KEY: ${{ secrets.SECRET_KEY }}
       ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
       ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL || secrets.SMTP_USER }}
@@ -75,23 +85,18 @@ jobs:
       - name: Validate application configuration
         env:
           ENVIRONMENT: production
-          APP_URL: https://trackr-alerts.vercel.app
+          APP_URL: ${{ vars.APP_URL || 'https://trackr-alerts.vercel.app' }}
         run: python -c "from trackr_app.config import settings; settings.validate()"
       - name: Synchronize web configuration
         run: python scripts/configure_vercel.py
-      - name: Migrate Neon
-        run: alembic upgrade head
-      - name: Save rollback target
-        id: previous
-        run: python scripts/deployment_status.py previous >> "$GITHUB_OUTPUT"
-      - name: Deploy production
-        id: deploy
-        run: vercel deploy --prod --yes --env "APP_COMMIT=$GITHUB_SHA" --token="$VERCEL_TOKEN"
-      - name: Verify production
-        id: verify
-        run: python scripts/deployment_status.py verify
-      - name: Restore previous deployment on verification failure
-        if: failure() && steps.verify.outcome == 'failure' && steps.previous.outputs.url != ''
-        env:
-          PREVIOUS_URL: ${{ steps.previous.outputs.url }}
-        run: vercel rollback "$PREVIOUS_URL" --yes --token="$VERCEL_TOKEN"
+      - name: Pull production build configuration
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+      - name: Build production artifact
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+      - name: Check artifact privacy
+        run: python scripts/check_artifact.py .vercel/output
+      - name: Verify candidate, bridge, migrate, promote and verify rollback on failure
+        run: python scripts/release.py
+      - name: Restore worker schedules after runner failure
+        if: always()
+        run: python scripts/worker_schedules.py resume

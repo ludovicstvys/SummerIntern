@@ -1,3 +1,4 @@
+import ssl
 import csv
 import smtplib
 import os
@@ -666,7 +667,7 @@ def send_email(open_offers, csv_path=None, programme_label="summer internship(s)
 
     with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as smtp:
         smtp.ehlo()
-        smtp.starttls()
+        smtp.starttls(context=ssl.create_default_context())
         smtp.ehlo()
         smtp.login(smtp_user, smtp_pass)
         refused = smtp.send_message(msg, from_addr=from_addr, to_addrs=to_addrs)

@@ -1,3 +1,4 @@
+from .runtime import guarded
 """CSV compatibility with durable, independent Notion and email tasks.
 
 Platform accounts always use the platform email pipeline. Legacy email remains
@@ -8,11 +9,12 @@ import json
 import os
 import time
 import uuid
+from datetime import timedelta
 from pathlib import Path
 from sqlalchemy import select, or_
 from trackr_common import canonical_offer_url, deduplicate_offers, scrape_open_programmes, write_csv, filter_offers_by_start_term
 from .database import SessionLocal
-from .models import LegacyTask, User, utcnow
+from .models import LegacyTask, User, SourceSnapshot, utcnow
 from .operations import insert_for, lock_state, error_code, next_retry
 
 
@@ -29,51 +31,81 @@ def enqueue(db, source, channel, recipient, offer, label, force=''):
     task = db.get(LegacyTask, key, populate_existing=True, with_for_update=True)
     if channel == 'notion' and task.payload != payload:
         task.payload, task.status, task.attempts = payload, 'pending', 0
-        task.next_attempt_at = None
+        # Preserve an outstanding lease/backoff when replacing the payload.
 
 
+@guarded(auth=False)
 def process_tasks(db, source, adapter, budget=90):
     deadline = time.monotonic() + budget
-    keys = db.scalars(select(LegacyTask.key).where(LegacyTask.source == source, LegacyTask.status == 'pending', or_(LegacyTask.next_attempt_at.is_(None), LegacyTask.next_attempt_at <= utcnow())).order_by(LegacyTask.created_at)).all()
+    due = or_(LegacyTask.next_attempt_at.is_(None), LegacyTask.next_attempt_at <= utcnow())
+    keys = db.scalars(select(LegacyTask.key).where(LegacyTask.source == source,
+        LegacyTask.status.in_(['pending', 'processing']), due)
+        .order_by(LegacyTask.created_at, LegacyTask.key).limit(100)).all()
     db.commit()
     errors = 0
     notion_context = None
     for key in keys:
         if time.monotonic() >= deadline:
             break
-        # Match producer lock order; no concurrent update can replace the payload
-        # while a worker is synchronizing an older version.
-        lock_state(db, 'legacy/' + source)
-        task = db.get(LegacyTask, key, populate_existing=True, with_for_update=True)
-        if task.status != 'pending':
-            db.commit(); continue
-        if task.channel == 'email':
-            migrated = db.scalar(select(User).where(User.email == task.recipient).with_for_update())
-            if migrated or os.getenv('LEGACY_EMAIL_ENABLED', 'true').lower() != 'true':
-                task.status = 'cancelled'; db.commit(); continue
-        if task.channel == 'notion' and not legacy_notion_enabled():
-            # Leave the task pending: disabling the circuit breaker must never
-            # discard work, and must not make an external request.
-            db.commit(); continue
-        payload = json.loads(task.payload)
         try:
-            if task.channel == 'notion':
-                if notion_context is None and hasattr(adapter, 'prepare_notion_sync'):
-                    notion_context = adapter.prepare_notion_sync()
-                if notion_context is None:
-                    adapter.sync_to_notion([payload['offer']])
-                else:
-                    adapter.sync_to_notion([payload['offer']], context=notion_context)
-            else:
-                if not adapter.send_email([payload['offer']], programme_label=payload['label'], recipients=[task.recipient], idempotency_key=task.key):
-                    raise RuntimeError('SMTP configuration missing')
-            task.status, task.last_error, task.next_attempt_at = 'sent', None, None
-        except Exception as exc:
+            lock_state(db, 'legacy/' + source)
+            task = db.scalar(select(LegacyTask).where(LegacyTask.key == key,
+                LegacyTask.status.in_(['pending', 'processing']),
+                or_(LegacyTask.next_attempt_at.is_(None), LegacyTask.next_attempt_at <= utcnow()))
+                .with_for_update().execution_options(populate_existing=True))
+            if not task:
+                db.commit(); continue
+            if task.attempts >= 5:
+                task.status, task.last_error = 'failed', task.last_error or 'LegacyLeaseExhausted'
+                db.commit(); errors += 1; continue
+            if task.channel == 'email':
+                migrated = db.scalar(select(User).where(User.email == task.recipient).with_for_update())
+                if migrated or os.getenv('LEGACY_EMAIL_ENABLED', 'true').lower() != 'true':
+                    task.status = 'cancelled'; db.commit(); continue
+            if task.channel == 'notion' and not legacy_notion_enabled():
+                db.commit(); continue
+            task.status, task.next_attempt_at = 'processing', utcnow() + timedelta(minutes=5)
             task.attempts += 1
-            task.status = 'failed' if task.attempts >= 5 else 'pending'
-            task.last_error, task.next_attempt_at = error_code(exc), next_retry(task.attempts)
+            lease, raw_payload, channel, recipient = task.next_attempt_at, task.payload, task.channel, task.recipient
+            db.commit()
+            failure = None
+            try:
+                payload = json.loads(raw_payload)
+                if channel == 'notion':
+                    if notion_context is None and hasattr(adapter, 'prepare_notion_sync'):
+                        notion_context = adapter.prepare_notion_sync()
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError('Legacy invocation budget exhausted')
+                    if notion_context is None:
+                        adapter.sync_to_notion([payload['offer']])
+                    else:
+                        adapter.sync_to_notion([payload['offer']], context=notion_context)
+                else:
+                    if not adapter.send_email([payload['offer']], programme_label=payload['label'],
+                            recipients=[recipient], idempotency_key=key):
+                        raise RuntimeError('SMTP configuration missing')
+            except Exception as exc:
+                failure = error_code(exc)
+                errors += 1
+            lock_state(db, 'legacy/' + source)
+            task = db.scalar(select(LegacyTask).where(LegacyTask.key == key,
+                LegacyTask.status == 'processing', LegacyTask.next_attempt_at == lease,
+                LegacyTask.payload == raw_payload).with_for_update().execution_options(populate_existing=True))
+            if not task:
+                db.commit(); continue
+            if failure:
+                task.status = 'failed' if task.attempts >= 5 or failure in ('JSONDecodeError', 'KeyError') else 'pending'
+                task.last_error, task.next_attempt_at = failure, next_retry(task.attempts)
+            else:
+                task.status, task.last_error, task.next_attempt_at = 'sent', None, None
+                task.attempts = max(0, task.attempts - 1)
+                from .maintenance import completed
+                completed(db, LegacyTask, task.key)
+            db.commit()
+        except Exception as exc:
+            db.rollback()
             errors += 1
-        db.commit()
+            print('Legacy task deferred: ' + error_code(exc))
     return errors
 
 
@@ -82,35 +114,63 @@ def run_collector(params, output_file, label, start_term=None):
     source = '/'.join((params['season'], params['region'], params['type']))
     failed = False
     with SessionLocal() as db:
-        try:
-            lock_state(db, 'legacy/' + source)
-            offers = deduplicate_offers(scrape_open_programmes(params))
-            previous = adapter.read_process_csv(output_file)
-            new_urls = {canonical_offer_url(o['offer_url']) for o in adapter.detect_new_offers(offers, previous)}
-            selected = filter_offers_by_start_term(offers, start_term) if start_term else offers
-            force = uuid.uuid4().hex if os.getenv('FORCE_EMAIL_ALL', '').lower() in ('1', 'true', 'yes') else ''
-            email_enabled = os.getenv('LEGACY_EMAIL_ENABLED', 'true').lower() == 'true'
-            recipients = adapter.read_email_recipients() if email_enabled else []
-            for offer in selected:
-                if legacy_notion_enabled() and adapter.NOTION_TOKEN and adapter.NOTION_DATA_SOURCE_ID and canonical_offer_url(offer['offer_url']) in new_urls:
-                    enqueue(db, source, 'notion', '', offer, label)
-                if force or canonical_offer_url(offer['offer_url']) in new_urls:
-                    for recipient in recipients:
-                        enqueue(db, source, 'email', recipient.lower(), offer, label, force)
-            # Commit outbox BEFORE CSV. A retry after either boundary preserves jobs.
-            db.commit()
-            if email_enabled and not recipients:
-                raise RuntimeError('Legacy recipients missing; configure TO_ADDRS or disable legacy email')
-            write_csv(offers, output_file)
-        except Exception as exc:
-            db.rollback()
-            print('Legacy collection failed: ' + error_code(exc))
-            failed = True
-        # An upstream failure must not prevent previously queued tasks from retrying.
-        failed = bool(process_tasks(db, source, adapter)) or failed
-        failed = bool(db.scalar(select(LegacyTask.key).where(LegacyTask.source == source, LegacyTask.status == 'failed').limit(1))) or failed
+        from .runtime import invocation
+        with invocation(db):
+            try:
+                from .sources import reserve, owned
+                claim = reserve(db, 'legacy/' + source)
+                if claim is None:
+                    return 0
+                snapshot = owned(db, 'legacy/' + source, claim)
+                first = snapshot.payload is None
+                previous = json.loads(snapshot.payload) if not first else adapter.read_process_csv(output_file)
+                missing_baseline = snapshot.updated_at is None and not Path(output_file).exists()
+                if first:
+                    snapshot.payload = json.dumps(previous)
+                db.commit()
+                acquired = scrape_open_programmes(params)
+                if getattr(acquired, 'complete', True) is False:
+                    raise RuntimeError('Incomplete legacy snapshot')
+                offers = deduplicate_offers(acquired)
+                if not offers and not getattr(offers, 'complete', False):
+                    raise RuntimeError('Ambiguous empty legacy snapshot')
+                lock_state(db, 'legacy/' + source)
+                snapshot = owned(db, 'legacy/' + source, claim)
+                if snapshot is None:
+                    db.rollback(); return 0
+                new_urls = {canonical_offer_url(o['offer_url']) for o in adapter.detect_new_offers(offers, previous)}
+                selected = filter_offers_by_start_term(offers, start_term) if start_term else offers
+                force = uuid.uuid4().hex if os.getenv('FORCE_EMAIL_ALL', '').lower() in ('1', 'true', 'yes') else ''
+                email_enabled = os.getenv('LEGACY_EMAIL_ENABLED', 'true').lower() == 'true'
+                recipients = adapter.read_email_recipients() if email_enabled else []
+                for offer in selected:
+                    if legacy_notion_enabled() and adapter.NOTION_TOKEN and adapter.NOTION_DATA_SOURCE_ID and canonical_offer_url(offer['offer_url']) in new_urls:
+                        enqueue(db, source, 'notion', '', offer, label)
+                    if force or (not missing_baseline and canonical_offer_url(offer['offer_url']) in new_urls):
+                        for recipient in recipients:
+                            enqueue(db, source, 'email', recipient.lower(), offer, label, force)
+                if not email_enabled or recipients:
+                    snapshot.payload, snapshot.updated_at = json.dumps(offers), utcnow()
+                snapshot.lease_until = None
+                # PostgreSQL snapshot and outbox advance together; CSV is only an export.
+                db.commit()
+                if email_enabled and not recipients:
+                    raise RuntimeError('Legacy recipients missing; configure TO_ADDRS or disable legacy email')
+                if os.getenv('LEGACY_EXPORT_CSV', 'false').lower() == 'true':
+                    write_csv(offers, output_file)
+            except Exception as exc:
+                db.rollback()
+                if 'claim' in locals() and claim:
+                    snapshot = owned(db, 'legacy/' + source, claim)
+                    if snapshot:
+                        snapshot.lease_until, snapshot.last_error = None, error_code(exc)
+                    db.commit()
+                print('Legacy collection failed: ' + error_code(exc))
+                failed = True
+            # An upstream failure must not prevent previously queued tasks from retrying.
+            failed = bool(process_tasks(db, source, adapter)) or failed
+            failed = bool(db.scalar(select(LegacyTask.key).where(LegacyTask.source == source, LegacyTask.status == 'failed').limit(1))) or failed
     return int(failed)
-
 
 SUMMER_SNAPSHOT_FILES = ('processus_ouverts.csv', 'processus_ouverts_fr_summer.csv', 'processus_ouverts_hk_summer.csv')
 LAST_EMAIL_SNAPSHOT_FILES = (

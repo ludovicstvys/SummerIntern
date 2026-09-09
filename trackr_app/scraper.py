@@ -1,4 +1,9 @@
 import json
+import time
+import os
+from .runtime import guarded
+from .sources import reserve, owned
+from .durable import enqueue_job, process_jobs
 from datetime import date
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -44,18 +49,32 @@ def _date(value):
     return date.fromisoformat(value) if value else None
 
 
+@guarded()
 def scrape_all(db: Session) -> dict[str, int]:
     seen = set()
     totals = dict(created=0, updated=0, closed=0, failed_trackers=0)
-    for params in TRACKERS:
+    deadline = time.monotonic() + 90
+    trackers = [TRACKERS[int(os.environ['TRACKR_SOURCE_INDEX'])]] if 'TRACKR_SOURCE_INDEX' in os.environ else TRACKERS
+    for params in trackers:
+        if time.monotonic() >= deadline:
+            break
         key = '/'.join((params.get('season', settings.season), params['region'], params['type']))
         delta = dict(created=0, updated=0, closed=0)
         try:
             # Serialize overlapping collectors before fetching, so an older snapshot
             # cannot overwrite a newer one. SMTP workers use separate user locks.
+            claim = reserve(db, 'platform/' + key)
+            if claim is None:
+                continue
+            acquired = scrape_open_programmes(params)
+            if getattr(acquired, 'complete', True) is False:
+                raise RuntimeError('Incomplete source snapshot')
+            raw = deduplicate_offers(acquired)
             lock_state(db, 'scrape-lock')
+            snapshot = owned(db, 'platform/' + key, claim)
+            if snapshot is None:
+                db.rollback(); continue
             state = lock_state(db, 'source/' + key)
-            raw = deduplicate_offers(scrape_open_programmes(params))
             if not raw and not getattr(raw, 'complete', False):
                 raise RuntimeError('Tracker returned an ambiguous empty snapshot')
             for item in raw:
@@ -126,9 +145,10 @@ def scrape_all(db: Session) -> dict[str, int]:
             # Stable user locking order inside queue_new_offer. Re-evaluate existing
             # offers as well, but retain the unique user/offer delivery history.
             for offer, before in changed.values():
-                queue_new_offer(db, offer)
-                if before is not None and before != offer_properties(offer):
-                    queue_notion_update(db, offer)
+                enqueue_job(db, f'match-offer/{offer.id}', 'match', {'offer_id': offer.id,
+                    'updated': before is not None and before != offer_properties(offer)})
+            snapshot.payload, snapshot.updated_at = json.dumps(raw), utcnow()
+            snapshot.lease_until, snapshot.last_error = None, None
             state.last_success_at, state.last_error = utcnow(), None
             db.commit()
             seen.update(tracker_seen)
@@ -136,9 +156,17 @@ def scrape_all(db: Session) -> dict[str, int]:
                 totals[name] += delta[name]
         except Exception as exc:
             db.rollback()
+            snapshot = owned(db, 'platform/' + key, claim) if 'claim' in locals() and claim else None
+            if snapshot is None and claim:
+                db.rollback(); continue
+            if snapshot:
+                snapshot.lease_until, snapshot.last_error = None, error_code(exc)
             state = lock_state(db, 'source/' + key)
             state.last_error = error_code(exc)
             db.commit()
             totals['failed_trackers'] += 1
             print(f'Tracker failed for {key}: {error_code(exc)}')
+    if 'TRACKR_SOURCE_INDEX' not in os.environ:
+        while time.monotonic() < deadline and process_jobs(db, 'match', deadline):
+            pass
     return {**totals, 'seen': len(seen)}

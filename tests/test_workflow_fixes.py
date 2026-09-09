@@ -138,17 +138,22 @@ def test_notion_setup_double_submit_creates_once(client, db, user):
     db.add(connection); db.commit()
     def create(db, connection, page_id):
         connection.database_id, connection.data_source_id, connection.setup_status = 'db', 'source', 'ready'
-    with patch('trackr_app.main.settings', SimpleNamespace(notion_available=True)), patch('trackr_app.main.create_offer_database', side_effect=create) as remote:
+    with patch('trackr_app.main.settings', SimpleNamespace(notion_available=True)), patch('trackr_app.notion.create_remote_database', return_value=('db', 'source')) as remote:
         for _ in range(2):
             assert client.post('/notion/setup', data={'csrf_token': 'csrf', 'page_id': 'parent'}, follow_redirects=False).status_code == 303
+        from trackr_app.durable import process_jobs
+        process_jobs(db)
     assert remote.call_count == 1
 
 
 def test_notion_uncertain_setup_does_not_create_again(client, db, user):
     db.add(NotionConnection(user_id=user.id, access_token_encrypted=encrypt('test'))); db.commit()
-    with patch('trackr_app.main.settings', SimpleNamespace(notion_available=True)), patch('trackr_app.main.create_offer_database', side_effect=TimeoutError()) as remote:
+    with patch('trackr_app.main.settings', SimpleNamespace(notion_available=True)), patch('trackr_app.notion.create_remote_database', side_effect=TimeoutError()) as remote:
         for _ in range(2):
             client.post('/notion/setup', data={'csrf_token': 'csrf', 'page_id': 'parent'}, follow_redirects=False)
+        from trackr_app.durable import process_jobs
+        process_jobs(db)
+        process_jobs(db)
     assert remote.call_count == 1 and user.notion.setup_status == 'uncertain'
 
 
@@ -218,3 +223,29 @@ def test_faulty_run_remediation_is_dry_run_then_cancels_only_pending(db):
     assert pending.status == 'pending'
     assert cancel_legacy_notion_window(db, start, end, apply=True)['cancelled'] == 1
     assert pending.status == 'cancelled' and sent.status == 'sent'
+
+
+def test_corrupt_legacy_payload_does_not_block_next_job(db):
+    adapter = SimpleNamespace(send_email=Mock(return_value=True))
+    db.add(LegacyTask(key='broken', source='source', channel='email', recipient='legacy@example.com', payload='not-json'))
+    enqueue(db, 'source', 'email', 'other-legacy@example.com', {'offer_url': 'https://example.com/valid'}, 'Summer')
+    db.commit()
+    assert process_tasks(db, 'source', adapter) == 1
+    assert db.get(LegacyTask, 'broken').status == 'failed'
+    assert db.query(LegacyTask).filter_by(status='sent').count() == 1
+    adapter.send_email.assert_called_once()
+
+
+def test_legacy_new_payload_is_not_overwritten_by_old_send(db):
+    original = {'offer_url': 'https://example.com/revision', 'name': 'Old'}
+    enqueue(db, 'source', 'notion', '', original, 'Summer'); db.commit()
+    def send(offers):
+        assert not db.in_transaction()
+        enqueue(db, 'source', 'notion', '', {**original, 'name': 'New'}, 'Summer')
+        db.commit()
+    adapter = SimpleNamespace(sync_to_notion=send)
+    assert process_tasks(db, 'source', adapter) == 0
+    task = db.query(LegacyTask).one()
+    assert task.status == 'pending'
+    assert json.loads(task.payload)['offer']['name'] == 'New'
+    assert task.next_attempt_at is not None

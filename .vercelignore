@@ -13,3 +13,8 @@ test_trackr_common.py
 
 scripts
 .env.*
+
+audit
+tools
+.trackr-backups
+.pytest_cache

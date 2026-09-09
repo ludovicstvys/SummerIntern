@@ -166,7 +166,9 @@ def test_preview_uses_cards_and_activation_still_works(feed):
     assert 'Activate alert' in preview.text
     activated = client.post('/preferences/activate', data=data, follow_redirects=False)
     assert activated.status_code == 303
-    assert activated.headers['location'].startswith('/dashboard?activated=')
+    assert activated.headers['location'].startswith('/dashboard?message=Preferences')
+    from trackr_app.models import DurableJob
+    assert db.query(DurableJob).filter_by(kind='match', status='pending').count() == 1
 
 
 def test_deadline_boundaries_and_future_opening(feed):

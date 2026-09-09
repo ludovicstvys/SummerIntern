@@ -4,16 +4,17 @@ on:
     - cron: "*/10 * * * *"
   workflow_dispatch:
 concurrency:
-  group: trackr-production-state
+  group: trackr-legacy
   cancel-in-progress: false
 permissions:
-  contents: write
+  contents: read
 jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: production
     env:
+      ENVIRONMENT: production
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       PYTHON_DOTENV_DISABLED: "1"
       LEGACY_EMAIL_ENABLED: ${{ vars.LEGACY_EMAIL_ENABLED || 'false' }}
@@ -44,19 +45,9 @@ jobs:
         run: |
           failed=0
           for script in test.py scrape_off_cycle_fr.py scrape_summer_fr.py scrape_off_cycle_uk.py scrape_summer_hk.py scrape_off_cycle_hk.py; do
-            timeout 150s python "$script" || failed=1
+            timeout 100s python "$script" || failed=1
           done
           exit "$failed"
-      - name: Commit valid CSV updates
-        if: always()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add processus_ouverts.csv processus_ouverts_fr_off_cycle.csv processus_ouverts_fr_summer.csv processus_ouverts_uk_off_cycle.csv processus_ouverts_hk_summer.csv processus_ouverts_hk_off_cycle.csv
-          if ! git diff --cached --quiet; then
-            git commit -m "Mise à jour des CSV internships"
-            git push
-          fi
       - name: Report partial collector failure
         if: steps.collectors.outcome == 'failure'
         run: exit 1

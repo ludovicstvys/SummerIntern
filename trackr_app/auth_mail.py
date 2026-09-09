@@ -1,8 +1,9 @@
+from .runtime import guarded
 """Durable auth delivery with short leases and fresh, persisted tokens per attempt."""
 from datetime import timedelta
 import time
 
-from sqlalchemy import select, or_
+from sqlalchemy import select, or_, update, case
 from sqlalchemy.orm import Session
 
 from .config import settings
@@ -46,6 +47,7 @@ def _cancelled(job, user, invitation):
             (not job.invitation_id and aware(job.created_at) < utcnow() - timedelta(hours=1)))
 
 
+@guarded(auth=True)
 def process_auth_mail(db, job_id, sender=None):
     job, user = _locked(db, job_id)
     if not job:
@@ -84,27 +86,46 @@ def process_auth_mail(db, job_id, sender=None):
 
     job, user = _locked(db, job_id)
     invitation = _invitation(db, job)
-    if job.status != 'processing' or job.attempts != attempt or _cancelled(job, user, invitation):
+    if job.status != 'processing' or (job.attempts != attempt or not job.processing_started_at or aware(job.processing_started_at) != now) or _cancelled(job, user, invitation):
         if job.status == 'processing' and job.attempts == attempt:
             job.status = 'cancelled'
         db.commit()
         return False
     path = '/auth/password/reset/' if job.kind == 'password' else '/auth/consume/'
+    recipient, kind = user.email, job.kind
+    # Release all user/job locks and the connection before contacting SMTP.
+    # Revocation after this check cannot recall an email, but deletes its token.
+    db.commit()
+    failure = None
     try:
-        (sender or (send_password_link if job.kind == 'password' else send_magic_link))(
-            user.email, settings.app_url + path + raw)
-        job.status, job.last_error, job.next_attempt_at = 'sent', None, None
+        (sender or (send_password_link if kind == 'password' else send_magic_link))(
+            recipient, settings.app_url + path + raw)
     except Exception as exc:
         # SMTP may have accepted the email: retain its already persisted token.
-        job.status = 'failed' if job.attempts >= 5 else 'pending'
-        job.last_error, job.next_attempt_at = error_code(exc), next_retry(job.attempts)
+        failure = error_code(exc)
+
+    job, user = _locked(db, job_id)
+    if not job or job.status != 'processing' or (job.attempts != attempt or not job.processing_started_at or aware(job.processing_started_at) != now):
+        db.commit()
+        return False
+    invitation = _invitation(db, job)
+    if _cancelled(job, user, invitation):
+        job.status = 'cancelled'
+    else:
+        job.status = ('failed' if attempt >= 5 else 'pending') if failure else 'sent'
+        job.last_error = failure
+        job.next_attempt_at = next_retry(attempt) if failure else None
     job.processing_started_at = None
     if invitation:
         invitation.delivery_status = job.status
-        invitation.attempts = job.attempts if job.last_error else max(0, job.attempts - 1)
+        invitation.attempts = attempt if failure else max(0, attempt - 1)
         invitation.last_error, invitation.next_attempt_at = job.last_error, job.next_attempt_at
+    if job.status == 'sent':
+        from .maintenance import completed
+        completed(db, AuthMail, job.id)
+    sent = job.status == 'sent'
     db.commit()
-    return job.status == 'sent'
+    return sent
 
 
 def deliver_in_background(job_id, bind=None):
@@ -116,6 +137,7 @@ def deliver_in_background(job_id, bind=None):
         print(f'Auth delivery deferred: {error_code(exc)}')
 
 
+@guarded(auth=True)
 def process_auth_queue(db, deadline=None):
     deadline = deadline or time.monotonic() + 90
     now = utcnow()
@@ -123,11 +145,37 @@ def process_auth_queue(db, deadline=None):
         or_(AuthMail.status == 'pending',
             (AuthMail.status == 'processing') & (AuthMail.processing_started_at <= now - LEASE)),
         or_(AuthMail.next_attempt_at.is_(None), AuthMail.next_attempt_at <= now)
-    ).order_by(AuthMail.id).limit(100)).all()
+    ).order_by(AuthMail.invitation_id.is_not(None), AuthMail.id).limit(100)).all()
     db.commit()
     count = 0
     for job_id in ids:
         if time.monotonic() >= deadline:
             break
-        count += process_auth_mail(db, job_id)
+        try:
+            count += process_auth_mail(db, job_id)
+        except Exception as exc:
+            db.rollback()
+            from cryptography.fernet import InvalidToken
+            if isinstance(exc, InvalidToken):
+                db.execute(update(AuthMail).where(AuthMail.id == job_id,
+                    AuthMail.status.in_(['pending', 'processing'])).values(
+                    status='failed', last_error='InvalidToken', processing_started_at=None))
+                invitation_id = db.scalar(select(AuthMail.invitation_id).where(AuthMail.id == job_id))
+                if invitation_id:
+                    db.execute(update(Invitation).where(Invitation.id == invitation_id, Invitation.accepted_at.is_(None),
+                        Invitation.delivery_status.in_(['pending', 'processing'])).values(delivery_status='failed', last_error='InvalidToken'))
+                db.commit()
+            else:
+                # A claim still in progress belongs to its attempt until expiry.
+                # Only a pending job may acquire a new backoff here.
+                try:
+                    db.execute(update(AuthMail).where(AuthMail.id == job_id,
+                        AuthMail.status == 'pending').values(
+                        attempts=AuthMail.attempts + 1,
+                        status=case((AuthMail.attempts >= 4, 'failed'), else_='pending'),
+                        last_error=error_code(exc), next_attempt_at=next_retry(5)))
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                print(f'Auth job deferred: {error_code(exc)}')
     return count

@@ -43,7 +43,7 @@ def pg():
 
 def test_postgres_migrations_match_models(pg):
     with pg.connect() as connection:
-        assert connection.scalar(text('select version_num from alembic_version')) == '20260908_0006'
+        assert connection.scalar(text('select version_num from alembic_version')) == '20260909_0007'
     with pg.begin() as connection:
         config = Config('alembic.ini'); config.attributes['connection'] = connection
         command.check(config)
@@ -337,7 +337,7 @@ def test_postgres_auth_mail_failed_status_commit_retains_delivered_token(pg):
         def commit():
             nonlocal calls
             calls += 1
-            if calls == 2:
+            if delivered:
                 raise RuntimeError('database unavailable after SMTP')
             original_commit()
         with patch.object(db, 'commit', side_effect=commit):
@@ -348,3 +348,122 @@ def test_postgres_auth_mail_failed_status_commit_retains_delivered_token(pg):
     with Session() as db:
         assert db.scalar(select(PasswordToken).where(
             PasswordToken.token_hash == token_hash(delivered[0].rsplit('/', 1)[-1]))) is not None
+
+
+def test_auth_revocation_does_not_wait_for_smtp(pg):
+    from trackr_app.auth_mail import enqueue, process_auth_mail
+    from trackr_app.models import AuthMail, PasswordToken
+    from trackr_app.sessions import revoke_user_auth
+    Session = sessionmaker(bind=pg, expire_on_commit=False)
+    with Session() as db:
+        user = User(email='slow-smtp@example.com'); db.add(user); db.flush()
+        user_id = user.id
+        job = enqueue(db, user.email, 'password'); db.commit()
+        job_id = job.id
+    entered, release = Event(), Event()
+    def sender(email, url):
+        entered.set()
+        assert release.wait(10)
+    def process():
+        with Session() as db:
+            return process_auth_mail(db, job_id, sender=sender)
+    def revoke():
+        with Session() as db:
+            db.execute(text("SET LOCAL lock_timeout = '1s'"))
+            db.get(User, user_id, with_for_update=True)
+            revoke_user_auth(db, user_id)
+            db.commit()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(process)
+        try:
+            assert entered.wait(10)
+            pool.submit(revoke).result(timeout=3)
+        finally:
+            release.set()
+        assert first.result(timeout=10) is False
+    with Session() as db:
+        assert db.query(PasswordToken).count() == 0
+        assert db.get(AuthMail, job_id).status == 'cancelled'
+
+
+def test_alert_revocation_does_not_wait_for_smtp(pg):
+    from sqlalchemy import update
+    from trackr_app.workers import process_immediate_alerts
+    Session = sessionmaker(bind=pg, expire_on_commit=False)
+    with Session() as db:
+        user = User(email='slow-alert@example.com'); db.add(user); db.flush()
+        user_id = user.id
+        db.add(Preference(user_id=user.id, status='active'))
+        offer = Offer(canonical_url='https://example.com/alert', offer_url='https://example.com/alert',
+            name='Intern', region='France', programme_type='summer')
+        db.add(offer); db.flush()
+        delivery = Delivery(user_id=user.id, offer_id=offer.id, mode='immediate')
+        db.add(delivery); db.commit(); delivery_id = delivery.id
+    entered, release = Event(), Event()
+    def send(*args):
+        entered.set()
+        assert release.wait(10)
+        return 'accepted-message'
+    def process():
+        with Session() as db:
+            return process_immediate_alerts(db)
+    def revoke():
+        with Session() as db:
+            db.execute(text("SET LOCAL lock_timeout = '1s'"))
+            user = db.get(User, user_id, with_for_update=True)
+            user.is_active = False
+            db.execute(update(Delivery).where(Delivery.user_id == user_id).values(
+                status='cancelled', processing_started_at=None))
+            db.commit()
+    with patch('trackr_app.workers.send_email', side_effect=send), ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(process)
+        try:
+            assert entered.wait(10)
+            pool.submit(revoke).result(timeout=3)
+        finally:
+            release.set()
+        assert first.result(timeout=10) == 0
+    with Session() as db:
+        assert db.get(Delivery, delivery_id).status == 'cancelled'
+
+
+def test_notion_claim_releases_user_lock_and_survives_revocation(pg):
+    from sqlalchemy import update
+    from trackr_app.notion import process_notion_queue
+    from trackr_app.models import NotionConnection, NotionSync
+    from trackr_app.security import encrypt
+    Session = sessionmaker(bind=pg, expire_on_commit=False)
+    with Session() as db:
+        user = User(email='slow-notion@example.com'); db.add(user); db.flush(); user_id = user.id
+        connection = NotionConnection(user_id=user.id, access_token_encrypted=encrypt('test-token'), data_source_id='source')
+        offer = Offer(canonical_url='https://example.com/notion', offer_url='https://example.com/notion', name='Intern', region='France', programme_type='summer')
+        db.add_all([connection, offer]); db.flush()
+        job = NotionSync(connection_id=connection.id, offer_id=offer.id, notion_page_id='page')
+        db.add(job); db.commit(); job_id = job.id
+    entered, release = Event(), Event()
+    def remote(*args, **kwargs):
+        from unittest.mock import Mock
+        entered.set()
+        assert release.wait(10)
+        return Mock(json=lambda: {'id': 'page'})
+    def process():
+        with Session() as db:
+            return process_notion_queue(db)
+    def revoke():
+        with Session() as db:
+            db.execute(text("SET LOCAL lock_timeout = '1s'"))
+            db.get(User, user_id, with_for_update=True).is_active = False
+            db.execute(update(NotionSync).where(NotionSync.id == job_id).values(status='cancelled'))
+            db.commit()
+    with patch('trackr_app.notion.requests.patch', side_effect=remote) as remote_call, ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(process)
+        try:
+            assert entered.wait(10)
+            assert pool.submit(process).result(timeout=3) == 0
+            pool.submit(revoke).result(timeout=3)
+        finally:
+            release.set()
+        assert first.result(timeout=10) == 0
+        assert remote_call.call_count == 1
+    with Session() as db:
+        assert db.get(NotionSync, job_id).status == 'cancelled'

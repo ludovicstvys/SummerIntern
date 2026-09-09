@@ -53,6 +53,25 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(process_digests(self.db), 0)
         send.assert_called_once()
 
+    @patch("trackr_app.workers.send_email", return_value="<stable@example.com>")
+    def test_digest_backlog_remains_durable_between_bounded_batches(self, send):
+        self.preference.delivery_mode = 'daily_digest'
+        self.preference.digest_time = time(0)
+        for i in range(101):
+            offer = Offer(canonical_url=f'https://example.com/batch/{i}', offer_url=f'https://example.com/batch/{i}',
+                name='Intern', region='France', programme_type='summer')
+            self.db.add(offer); self.db.flush()
+            self.db.add(Delivery(user_id=self.user.id, offer_id=offer.id, mode='daily_digest'))
+        self.db.commit()
+        self.assertEqual(process_digests(self.db), 1)
+        self.assertIsNone(self.preference.last_digest_date)
+        self.assertEqual(self.db.query(Delivery).filter_by(status='sent').count(), 100)
+        self.assertEqual(process_digests(self.db), 1)
+        self.assertIsNotNone(self.preference.last_digest_date)
+        self.assertEqual(self.db.query(Delivery).filter_by(status='sent').count(), 101)
+        self.assertEqual(process_digests(self.db), 0)
+        self.assertEqual(send.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

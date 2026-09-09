@@ -71,7 +71,14 @@ def valid_form_origin(request, origin):
     scheme = 'https' if configured.scheme == 'https' else request.url.scheme
     served = normalized_origin(f'{scheme}://{request.url.netloc}')
     candidate = normalized_origin(origin)
-    return candidate is not None and candidate in (canonical, served)
+    explicit = {normalized_origin(item.strip()) for item in getattr(settings, 'auth_allowed_origins', '').split(',') if item.strip()}
+    development = getattr(settings, 'environment', 'development') == 'development' and os.getenv('VERCEL') != '1'
+    allowed = {canonical, *explicit}
+    if getattr(settings, 'allow_deployment_host', False) and os.getenv('VERCEL_URL'):
+        allowed.add(normalized_origin('https://' + os.environ['VERCEL_URL']))
+    if development:
+        allowed.add(served)
+    return candidate is not None and candidate in allowed
 
 
 def check_form(request, value):

@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="narrow"><h1>Failed jobs</h1>
+<nav>{% for name in kinds %}<a href="/admin/jobs?kind={{ name }}">{{ name|title }}</a> {% endfor %}</nav>
+{% for job in jobs %}<article><p>{{ job.id }} · {{ job.status }} · {{ job.attempts }} attempts · {{ job.error }}</p>
+{% if job.status == 'failed' %}<form method="post" action="/admin/jobs/retry"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="kind" value="{{ kind }}"><input type="hidden" name="job_id" value="{{ job.id }}"><button class="secondary">Retry this job</button></form>{% else %}<p>Check the existing Notion database and recover it from Notion setup.</p>{% endif %}</article>{% else %}<p>No unresolved failures.</p>{% endfor %}
+{% if next_after %}<a href="/admin/jobs?kind={{ kind }}&amp;after={{ next_after|urlencode }}">Next jobs</a>{% endif %}</section>
+{% endblock %}

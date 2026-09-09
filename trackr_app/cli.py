@@ -3,12 +3,13 @@ import json
 import time
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select, delete
+from sqlalchemy import func, select, delete, case
 
 from .database import SessionLocal
 from .models import AuthMail, Delivery, NotionSync, Invitation, User, Preference, LegacyTask, UserSession, MagicLink, WorkerState, utcnow
 from .config import settings
 from .invitations import process_invitations
+from .auth_mail import process_auth_queue
 from .operations import lock_state, insert_for
 from .sessions import revoke_user_auth
 from .preferences import activate_preference
@@ -18,19 +19,65 @@ from .legacy import reconcile_summer_snapshot, cancel_legacy_notion_window, sync
 
 
 def run_command(command):
+    from .operations import error_code
     with SessionLocal() as db:
-        if command == 'sync-notion' and not settings.notion_available:
+        state = lock_state(db, 'execution/' + command)
+        state.last_success_at, state.last_error = utcnow(), 'running'
+        db.commit()
+    failure = None
+    try:
+        result = _run_command(command)
+        failure = 'ProcessingErrors' if result else None
+        return result
+    except Exception as exc:
+        failure = error_code(exc)
+        raise
+    finally:
+        with SessionLocal() as db:
+            state = lock_state(db, 'execution/' + command)
+            state.last_error = failure
+            db.commit()
+
+
+def _run_command(command):
+    with SessionLocal() as db:
+        if command in ('sync-notion', 'process-notion-setup') and not settings.notion_available:
             print(json.dumps({'command': command, 'status': 'disabled'}))
             return 0
         if command == "scrape-all":
             result = scrape_all(db)
             print(json.dumps(result), flush=True)
             return int(result["failed_trackers"] > 0)
-        model = Invitation if command == 'process-invitations' else NotionSync if command == "sync-notion" else Delivery
+        from .durable import process_jobs
+        from .models import DurableJob
+        if command == 'purge':
+            from .maintenance import purge
+            print(json.dumps(purge(db)))
+            return 0
+        if command in ('process-matches', 'process-notion-setup'):
+            kind = 'match' if command == 'process-matches' else 'notion-create'
+            deadline = time.monotonic() + 90
+            count = process_jobs(db, kind, deadline)
+            if kind == 'match':
+                while time.monotonic() < deadline:
+                    batch = process_jobs(db, kind, deadline)
+                    count += batch
+                    if not batch:
+                        break
+            failed = db.scalar(select(func.count()).select_from(DurableJob).where(DurableJob.kind == kind, ((DurableJob.status.in_(['failed', 'uncertain'])) | ((DurableJob.status == 'pending') & DurableJob.last_error.is_not(None)))))
+            print(json.dumps({'command': command, 'completed': count, 'failed': failed}))
+            state = lock_state(db, command)
+            state.last_error = 'ProcessingErrors' if failed else None
+            if not failed:
+                state.last_success_at = utcnow()
+            db.commit()
+            return int(bool(failed))
+        model = AuthMail if command == 'process-auth-mail' else Invitation if command == 'process-invitations' else NotionSync if command == "sync-notion" else Delivery
         filters = [Delivery.mode == ("immediate" if command == "process-immediate-alerts" else "daily_digest")] if model is Delivery else []
-        before = db.scalar(select(func.coalesce(func.sum(model.attempts), 0)).where(*filters))
-        count = {"process-immediate-alerts": process_immediate_alerts, "process-digests": process_digests, "sync-notion": sync_notion, 'process-invitations': process_invitations}[command](db)
-        after = db.scalar(select(func.coalesce(func.sum(model.attempts), 0)).where(*filters))
+        error_attempts = case((model.last_error.is_not(None), model.attempts), else_=0) if model is AuthMail else model.attempts
+        before = db.scalar(select(func.coalesce(func.sum(error_attempts), 0)).where(*filters))
+        count = {"process-immediate-alerts": process_immediate_alerts, "process-digests": process_digests, "sync-notion": sync_notion, 'process-invitations': process_invitations, 'process-auth-mail': process_auth_queue}[command](db)
+        after = db.scalar(select(func.coalesce(func.sum(error_attempts), 0)).where(*filters))
         status_column = Invitation.delivery_status if model is Invitation else model.status
         statuses = dict(db.execute(select(status_column, func.count()).where(*filters).group_by(status_column)).all())
         print(json.dumps({"command": command, "completed": count, "deferred": statuses.get("pending", 0) + statuses.get("processing", 0), "failed": statuses.get("failed", 0), "errors_this_run": max(0, after - before)}), flush=True)
@@ -69,7 +116,7 @@ def maintenance(args):
         elif args.command == 'retry-failed':
             if not args.kind or not args.id:
                 raise ValueError('--kind and --id are required for a targeted retry')
-            model = {'email': Delivery, 'notion': NotionSync, 'invitation': Invitation, 'legacy': LegacyTask}[args.kind]
+            model = {'email': Delivery, 'notion': NotionSync, 'invitation': Invitation, 'legacy': LegacyTask, 'auth': AuthMail}[args.kind]
             identity = args.id if model is LegacyTask else int(args.id)
             task = db.get(model, identity, with_for_update=True)
             column = 'delivery_status' if model is Invitation else 'status'
@@ -117,8 +164,8 @@ def maintenance(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Trackr Alerts background commands")
-    parser.add_argument("command", choices=("scrape-all", "process-immediate-alerts", "process-digests", "digest-worker", "sync-notion", 'process-invitations', 'retry-failed', 'promote-admin', 'import-legacy-subscribers', 'check-operations', 'reconcile-legacy-summer', 'sync-last-email-offers', 'remediate-legacy-notion'))
-    parser.add_argument('--kind', choices=['email', 'notion', 'invitation', 'legacy'])
+    parser.add_argument("command", choices=("scrape-all", "process-immediate-alerts", "process-digests", "digest-worker", "sync-notion", 'process-invitations', 'process-auth-mail', 'process-matches', 'process-notion-setup', 'purge', 'retry-failed', 'promote-admin', 'import-legacy-subscribers', 'check-operations', 'reconcile-legacy-summer', 'sync-last-email-offers', 'remediate-legacy-notion'))
+    parser.add_argument('--kind', choices=['email', 'notion', 'invitation', 'legacy', 'auth'])
     parser.add_argument('--id')
     parser.add_argument('--email')
     parser.add_argument('--apply', action='store_true', help='perform the otherwise read-only remediation or reconciliation')
@@ -136,11 +183,17 @@ def main():
             except Exception as exc:
                 print(json.dumps({"digest_worker_error": type(exc).__name__}), flush=True)
             time.sleep(60)
+    import signal
+    def deadline_reached(signum, frame):
+        raise TimeoutError('InvocationDeadlineExceeded')
+    signal.signal(signal.SIGALRM, deadline_reached)
+    signal.alarm(90)
     try:
         status = run_command(command)
     except Exception as exc:
         print(json.dumps({"command": command, "error": type(exc).__name__}), flush=True)
         status = 1
+    signal.alarm(0)
     raise SystemExit(status)
 
 

@@ -55,16 +55,47 @@ def offer_is_open(offer):
     return offer.is_open and dates_are_open(offer.opening_date, offer.closing_date)
 
 
+def matching_query(preference):
+    from sqlalchemy import and_, or_
+    from .models import OfferSource
+    today = utcnow().date()
+    def scope(model):
+        predicates = [model.region.in_(json_list(preference.regions)),
+            model.programme_type.in_(json_list(preference.program_types)), model.is_open.is_(True),
+            or_(model.opening_date.is_(None), model.opening_date <= today),
+            or_(model.closing_date.is_(None), model.closing_date >= today)]
+        terms = json_list(preference.start_terms)
+        if terms:
+            predicates.append(or_(model.programme_type != 'off-cycle', model.start_term.in_(terms)))
+        return predicates
+    return select(Offer).where(Offer.is_open.is_(True), or_(
+        Offer.sources.any(and_(OfferSource.season == settings.season, *scope(OfferSource))),
+        and_(~Offer.sources.any(), *scope(Offer)))).order_by(Offer.id)
+
+
 def matching_offers(db: Session, preference: Preference) -> list[Offer]:
-    return [offer for offer in db.scalars(select(Offer).where(Offer.is_open.is_(True))).all() if offer_is_open(offer) and offer_matches(offer, preference)]
+    return list(db.scalars(matching_query(preference)))
 
 
-def activate_preference(db: Session, preference: Preference, commit=True) -> int:
+def activate_preference(db: Session, preference: Preference, commit=True, defer=False) -> int:
     preference.status = "active"
     preference.activated_at = utcnow()
+    from .maintenance import runtime_available
+    if defer and runtime_available(db):
+        from .durable import enqueue_job
+        enqueue_job(db, f'match-user/{preference.user_id}', 'match',
+            {'user_id': preference.user_id, 'baseline': True, 'reconcile': True})
+        if commit:
+            db.commit()
+        return 0
     # Keep already delivered history; reconcile only unfinished alerts.
     deliveries = db.scalars(select(Delivery).where(Delivery.user_id == preference.user_id)).all()
     sent_offers = {item.offer_id for item in deliveries if item.status == "sent"}
+    from .maintenance import runtime_available
+    from .models import DurableJob
+    if runtime_available(db):
+        receipts = db.scalars(select(DurableJob.key).where(DurableJob.kind == 'receipt', DurableJob.key.startswith(f'receipt/{preference.user_id}/'))).all()
+        sent_offers.update(int(key.rsplit('/', 1)[-1]) for key in receipts)
     by_mode = {(item.offer_id, item.mode): item for item in deliveries}
     for item in deliveries:
         if item.status not in ("pending", "processing", "failed", "cancelled"):
@@ -144,3 +175,29 @@ def digest_is_due(preference: Preference, now: datetime | None = None) -> bool:
     if preference.last_digest_date == local.date():
         return False
     return local.time().replace(tzinfo=None) >= preference.digest_time
+
+
+def reconcile_delivery(db, preference, item):
+    """Reconcile one persisted delivery without erasing sent history."""
+    from .models import DurableJob
+    if item.status not in ('pending', 'processing', 'failed', 'cancelled'):
+        return
+    sent = db.scalar(select(Delivery.id).where(Delivery.user_id == item.user_id,
+        Delivery.offer_id == item.offer_id, Delivery.status == 'sent').limit(1))
+    receipt = db.get(DurableJob, f'receipt/{item.user_id}/{item.offer_id}')
+    offer = db.get(Offer, item.offer_id)
+    if sent or receipt or not offer or not offer_is_open(offer) or not offer_matches(offer, preference):
+        item.status, item.processing_started_at = 'cancelled', None
+    elif item.mode != preference.delivery_mode:
+        failed = item.status == 'failed'
+        item.status, item.processing_started_at = 'cancelled', None
+        target = db.scalar(select(Delivery).where(Delivery.user_id == item.user_id,
+            Delivery.offer_id == item.offer_id, Delivery.mode == preference.delivery_mode))
+        if target is None:
+            db.add(Delivery(user_id=item.user_id, offer_id=item.offer_id, mode=preference.delivery_mode,
+                attempts=item.attempts, status='failed' if failed else 'pending'))
+        elif target.status == 'cancelled':
+            target.status = 'failed' if target.attempts >= 5 else 'pending'
+    elif item.status == 'cancelled':
+        item.status = 'failed' if item.attempts >= 5 else 'pending'
+        item.next_attempt_at = None

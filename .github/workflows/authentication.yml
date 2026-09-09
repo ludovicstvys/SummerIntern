@@ -1,17 +1,17 @@
-name: Trackr platform jobs
+name: Trackr authentication delivery
 on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 concurrency:
-  group: trackr-deliveries
+  group: trackr-authentication
   cancel-in-progress: false
 permissions:
   contents: read
 jobs:
   process:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     environment: production
     env:
       ENVIRONMENT: production
@@ -37,30 +37,14 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: python -m pip install -r requirements.txt
-      - name: Reconcile matching batches
-        id: matches
+      - name: Retry public authentication requests first
+        id: auth
         continue-on-error: true
-        run: timeout 100s python -m trackr_app.cli process-matches
-      - name: Create requested Notion databases
-        id: setup
+        run: timeout 100s python -m trackr_app.cli process-auth-mail
+      - name: Deliver invitations
+        id: invitations
         continue-on-error: true
-        run: timeout 100s python -m trackr_app.cli process-notion-setup
-      - name: Send immediate alerts
-        id: immediate
-        continue-on-error: true
-        run: timeout 150s python -m trackr_app.cli process-immediate-alerts
-      - name: Send daily digests
-        id: digests
-        continue-on-error: true
-        run: timeout 150s python -m trackr_app.cli process-digests
-      - name: Sync personal Notion databases when enabled
-        id: notion
-        continue-on-error: true
-        run: timeout 180s python -m trackr_app.cli sync-notion
-      - name: Check freshness and queues
-        id: operations
-        continue-on-error: true
-        run: python -m trackr_app.cli check-operations
+        run: timeout 100s python -m trackr_app.cli process-invitations
       - name: Report processing failure
-        if: steps.matches.outcome == 'failure' || steps.setup.outcome == 'failure' || steps.immediate.outcome == 'failure' || steps.digests.outcome == 'failure' || steps.notion.outcome == 'failure' || steps.operations.outcome == 'failure'
+        if: steps.auth.outcome == 'failure' || steps.invitations.outcome == 'failure'
         run: exit 1
