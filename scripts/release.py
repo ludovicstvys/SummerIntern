@@ -43,7 +43,7 @@ def release():
         '--env', 'APP_COMMIT=' + os.environ['GITHUB_SHA'], '--env', 'ALLOW_DEPLOYMENT_HOST=true').splitlines()[-1]
     if not candidate.startswith('https://') or not candidate.endswith('.vercel.app'):
         raise RuntimeError('Invalid candidate deployment URL')
-    verify(candidate)
+    verify(candidate, candidate=True)
     promoted = False
     try:
         if SCHEMA_REVISION not in old.get('compatible_schemas', []):
@@ -61,7 +61,7 @@ def release():
             migrate(engine)
         finally:
             engine.dispose()
-        verify(candidate)
+        verify(candidate, candidate=True)
         promoted = True
         vercel('promote', candidate, '--yes')
         verify(settings.app_url)
