@@ -19,7 +19,8 @@ def read(url, candidate=False):
         result = subprocess.run(['vercel', 'curl', url, '--token=' + os.environ['VERCEL_TOKEN']],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode:
-            raise RuntimeError('CandidateCurlFailed')
+            detail = (result.stderr or result.stdout).strip().replace(os.environ['VERCEL_TOKEN'], '***')
+            raise RuntimeError('CandidateCurlFailed' + (':' + detail if detail else ''))
         return result.stdout.encode()
     with urllib.request.urlopen(request(url), timeout=20) as response:
         return response.read()
@@ -47,7 +48,7 @@ def verify(base=None, expected_commit=None, candidate=False):
             print('Health, version, login, assets and protected-page redirect verified')
             return health
         except Exception as exc:
-            print(f'Smoke check attempt {attempt + 1}: {type(exc).__name__}')
+            print(f'Smoke check attempt {attempt + 1}: {exc}')
             if attempt == 11:
                 raise RuntimeError('DeploymentVerificationFailed') from None
             time.sleep(10)

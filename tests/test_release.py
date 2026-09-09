@@ -42,3 +42,11 @@ def test_candidate_smoke_request_uses_vercel_curl(monkeypatch):
     with patch('scripts.deployment_status.subprocess.run', return_value=result) as run:
         assert read('https://candidate.vercel.app/health', candidate=True) == b'{"status":"ok"}'
     assert run.call_args.args[0] == ['vercel', 'curl', 'https://candidate.vercel.app/health', '--token=test-token']
+
+
+def test_candidate_smoke_request_redacts_cli_token_on_failure(monkeypatch):
+    monkeypatch.setenv('VERCEL_TOKEN', 'test-token')
+    result = SimpleNamespace(returncode=1, stdout='', stderr='invalid token: test-token')
+    with patch('scripts.deployment_status.subprocess.run', return_value=result):
+        with pytest.raises(RuntimeError, match=r'CandidateCurlFailed:invalid token: \*\*\*'):
+            read('https://candidate.vercel.app/health', candidate=True)
