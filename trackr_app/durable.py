@@ -145,6 +145,7 @@ def match_batch(db, key):
         job = db.get(DurableJob, key, with_for_update=True, populate_existing=True)
         if job.status == 'processing' and job.lease_token == token:
             job.status, job.lease_until, job.attempts = 'pending', None, 0
+            job.last_error, job.next_attempt_at = None, None
             if batch:
                 job.cursor = batch[-1].id
             else:
@@ -185,6 +186,9 @@ def match_batch(db, key):
     if job.status != 'processing' or job.lease_token != token:
         db.commit(); return len(pairs)
     job.status, job.lease_until, job.attempts = 'pending', None, 0
+    # A successful retry must clear its former transient failure.  Otherwise
+    # the scheduler reports a healthy, in-progress batch as an error forever.
+    job.last_error, job.next_attempt_at = None, None
     if pairs:
         job.cursor = pairs[-1][0 if 'offer_id' in payload else 1]
     else:

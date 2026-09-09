@@ -45,13 +45,15 @@ def test_source_generation_rejects_stale_application(db):
 
 def test_matching_baseline_is_durable_and_sends_no_old_offers(db, user, offer):
     enqueue_job(db, 'baseline', 'match', {'user_id': user.id, 'baseline': True, 'reconcile': True})
+    db.get(DurableJob, 'baseline').last_error = 'OperationalError'
     db.commit()
     for _ in range(5):
         process_jobs(db, 'match')
     from trackr_app.models import UserOffer
     assert db.query(UserOffer).one().baseline
     assert db.query(Delivery).count() == 0
-    assert db.get(DurableJob, 'baseline').status == 'done'
+    job = db.get(DurableJob, 'baseline')
+    assert job.status == 'done' and job.last_error is None
 
 
 def test_migration_gate_blocks_claims_and_resumes_on_failure(pg):
