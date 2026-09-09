@@ -20,7 +20,8 @@ def vercel(*args):
     result = subprocess.run(['vercel', *args, '--token=' + os.environ['VERCEL_TOKEN']],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode:
-        raise RuntimeError('VercelCommandFailed:' + args[0])
+        detail = (result.stderr or result.stdout).strip().replace(os.environ['VERCEL_TOKEN'], '***')
+        raise RuntimeError('VercelCommandFailed:' + args[0] + (':' + detail if detail else ''))
     return result.stdout.strip()
 
 
@@ -77,5 +78,5 @@ if __name__ == '__main__':
     try:
         release()
     except Exception as exc:
-        print('Release failed: ' + type(exc).__name__, file=sys.stderr)
+        print('Release failed: ' + str(exc), file=sys.stderr)
         raise SystemExit(1)
