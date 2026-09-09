@@ -89,6 +89,8 @@ jobs:
         run: python -c "from trackr_app.config import settings; settings.validate()"
       - name: Synchronize web configuration
         run: python scripts/configure_vercel.py
+      - name: Link Vercel project
+        run: vercel link --yes --team="$VERCEL_ORG_ID" --project="$VERCEL_PROJECT_ID" --token="$VERCEL_TOKEN"
       - name: Pull production build configuration
         run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
       - name: Build production artifact
