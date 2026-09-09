@@ -16,7 +16,7 @@ def request(url):
 
 def read(url, candidate=False):
     if candidate:
-        result = subprocess.run(['vercel', 'curl', url, '--token=' + os.environ['VERCEL_TOKEN']],
+        result = subprocess.run(['vercel', 'curl', url],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         if result.returncode:
             detail = (result.stderr or result.stdout).strip().replace(os.environ['VERCEL_TOKEN'], '***')
