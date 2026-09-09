@@ -5,7 +5,7 @@ from .runtime import guarded
 from .sources import reserve, owned
 from .durable import enqueue_job, process_jobs
 from datetime import date
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 from trackr_common import canonical_offer_url, deduplicate_offers, scrape_open_programmes
 from .config import settings
@@ -70,6 +70,12 @@ def scrape_all(db: Session) -> dict[str, int]:
             if getattr(acquired, 'complete', True) is False:
                 raise RuntimeError('Incomplete source snapshot')
             raw = deduplicate_offers(acquired)
+            # Applying a snapshot changes shared offers and delivery queues, so
+            # writers remain serialized. Fetches still run in parallel; allow a
+            # bounded wait for the preceding writer rather than treating the
+            # normal two-second request lock timeout as a tracker outage.
+            if db.bind.dialect.name == 'postgresql':
+                db.execute(text("SET LOCAL lock_timeout = '30s'"))
             lock_state(db, 'scrape-lock')
             snapshot = owned(db, 'platform/' + key, claim)
             if snapshot is None:
