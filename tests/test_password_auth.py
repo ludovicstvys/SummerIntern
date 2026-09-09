@@ -98,6 +98,19 @@ def test_auth_posts_require_csrf(auth_env, path):
     assert client.post(path, data=data).status_code == 403
 
 
+def test_null_origin_is_accepted_only_for_same_origin_browser_navigation(auth_env):
+    client, _, _ = auth_env
+    data = auth_form(client, email='unknown@example.com')
+    accepted = client.post('/auth/password/request', data=data, headers={
+        'origin': 'null', 'sec-fetch-site': 'same-origin',
+    }, follow_redirects=False)
+    assert accepted.status_code == 303
+    rejected = client.post('/auth/password/request', data=auth_form(client, email='other@example.com'), headers={
+        'origin': 'null', 'sec-fetch-site': 'cross-site',
+    }, follow_redirects=False)
+    assert rejected.status_code == 403
+
+
 def test_expired_form_token_rejected(auth_env):
     client, _, _ = auth_env
     with patch('itsdangerous.timed.TimestampSigner.get_timestamp', return_value=1):

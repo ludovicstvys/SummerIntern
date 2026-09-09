@@ -84,7 +84,11 @@ def valid_form_origin(request, origin):
 def check_form(request, value):
     cookie = request.cookies.get(FORM_COOKIE, '')
     origin = request.headers.get('origin')
-    if origin is not None and not valid_form_origin(request, origin):
+    # Chromium can emit the opaque ``null`` origin for a same-origin document
+    # when privacy isolation is enabled. Keep the signed, browser-bound form
+    # token mandatory and accept that narrow browser-verified navigation case.
+    opaque_same_origin = origin == 'null' and request.headers.get('sec-fetch-site') == 'same-origin'
+    if origin is not None and not opaque_same_origin and not valid_form_origin(request, origin):
         raise AuthFormError(403, 'Invalid form origin. Please reopen the form.')
     try:
         # The cookie identifies the browser; each rendered form has its own hour.
