@@ -98,10 +98,15 @@ def test_auth_posts_require_csrf(auth_env, path):
     assert client.post(path, data=data).status_code == 403
 
 
-def test_auth_pages_preserve_same_origin_referrer_for_csrf_origin_checks(auth_env):
+def test_auth_pages_preserve_origin_without_exposing_auth_paths_in_referer(auth_env):
     client, _, _ = auth_env
     response = client.get('/auth/password/request')
-    assert response.headers['referrer-policy'] == 'same-origin'
+    assert response.headers['referrer-policy'] == 'strict-origin'
+    data = auth_form(client, email='unknown@example.com')
+    rejected = client.post('/auth/password/request', data=data, headers={
+        'origin': 'null', 'sec-fetch-site': 'same-origin',
+    }, follow_redirects=False)
+    assert rejected.status_code == 403
 
 
 def test_expired_form_token_rejected(auth_env):
