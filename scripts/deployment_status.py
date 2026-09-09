@@ -41,10 +41,13 @@ def verify(base=None, expected_commit=None, candidate=False):
         try:
             health = json.loads(read(base + '/health', candidate))
             if health.get('status') != 'ok' or health.get('commit') != expected_commit:
-                raise RuntimeError('Unexpected production version')
+                raise RuntimeError(
+                    'Unexpected deployment state: '
+                    f"status={health.get('status')!r}, commit={health.get('commit')!r}"
+                )
             for path, content in [('/login', 'Sign'), ('/static/app.css', '{'), ('/dashboard', 'Sign')]:
                 if content not in read(base + path, candidate).decode():
-                    raise RuntimeError('Unexpected public response')
+                    raise RuntimeError('Unexpected public response for ' + path)
             print('Health, version, login, assets and protected-page redirect verified')
             return health
         except Exception as exc:
