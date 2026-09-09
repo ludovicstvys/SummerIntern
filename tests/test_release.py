@@ -41,7 +41,7 @@ def test_candidate_smoke_request_uses_vercel_curl(monkeypatch):
     result = SimpleNamespace(returncode=0, stdout='{"status":"ok"}', stderr='')
     with patch('scripts.deployment_status.subprocess.run', return_value=result) as run:
         assert read('https://candidate.vercel.app/health', candidate=True) == b'{"status":"ok"}'
-    assert run.call_args.args[0] == ['vercel', 'curl', 'https://candidate.vercel.app/health']
+    assert run.call_args.args[0] == ['vercel', 'curl', 'https://candidate.vercel.app/health', '--', '--location']
 
 
 def test_candidate_smoke_request_redacts_cli_token_on_failure(monkeypatch):
