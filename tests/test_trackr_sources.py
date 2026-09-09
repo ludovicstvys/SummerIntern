@@ -57,6 +57,22 @@ def test_explicitly_closed_spring_weeks_are_not_returned_as_open():
     assert [offer["name"] for offer in offers] == ["Open Spring Week"]
 
 
+def test_programme_without_external_url_uses_stable_trackr_page_anchor():
+    response = Mock()
+    response.json.return_value = {"programmes": [{
+        "id": "graduate-1", "name": "Graduate Analyst", "url": None,
+        "openingDate": "2026-09-01T00:00:00.000Z", "company": {}, "categories": [],
+    }]}
+    params = {
+        "region": "France", "industry": "Finance", "season": "2027",
+        "type": "graduate-programmes", "page_url": "https://app.the-trackr.com/france-finance/graduate-programmes",
+    }
+    with patch("trackr_common.requests.get", return_value=response):
+        offers = scrape_open_programmes(params)
+
+    assert offers[0]["offer_url"] == "https://app.the-trackr.com/france-finance/graduate-programmes#graduate-1"
+
+
 def test_requested_trackr_sources_are_registered():
     requested = {
         (source["region"], source["type"])

@@ -151,7 +151,14 @@ def scrape_open_programmes(params):
         if not isinstance(item, dict) or item.get("openingDate") is None:
             continue
 
-        if not canonical_offer_url(item.get("url")) or not (item.get("name") or '').strip() or not iso_to_date(item.get("openingDate")):
+        # A few Trackr records have complete metadata but omit the external
+        # application URL.  The configured listing page and record id still
+        # form a stable, useful destination (as with Spring Weeks), whereas
+        # rejecting the whole response would make the source permanently fail.
+        offer_url = item.get("url") or (
+            f"{params['page_url']}#{item['id']}" if params.get("page_url") and item.get("id") else ""
+        )
+        if not canonical_offer_url(offer_url) or not (item.get("name") or '').strip() or not iso_to_date(item.get("openingDate")):
             raise RuntimeError("Trackr returned an incomplete open programme")
         if item.get('closingDate') and not iso_to_date(item['closingDate']):
             raise RuntimeError('Trackr returned an invalid closing date')
@@ -166,7 +173,7 @@ def scrape_open_programmes(params):
                 "name": (item.get("name") or "").strip(),
                 "company": company.get("name"),
                 "company_id": company.get("id"),
-                "offer_url": (item.get("url") or "").strip(),
+                "offer_url": offer_url.strip(),
                 "region": item.get("region"),
                 "categories": categories,
                 "opening_date": iso_to_date(item.get("openingDate")),

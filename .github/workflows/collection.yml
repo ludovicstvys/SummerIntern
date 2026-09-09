@@ -14,7 +14,9 @@ jobs:
     timeout-minutes: 5
     strategy:
       fail-fast: false
-      max-parallel: 3
+      # Snapshot application has a shared PostgreSQL write section.  Two
+      # concurrent fetches keep the run responsive without starving a writer.
+      max-parallel: 2
       matrix:
         source: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     environment: production
