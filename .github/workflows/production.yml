@@ -61,7 +61,10 @@ jobs:
       MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL || secrets.DATABASE_URL }}
       APP_URL: ${{ vars.APP_URL || 'https://trackr-alerts.vercel.app' }}
       ALLOWED_HOSTS: ${{ vars.ALLOWED_HOSTS }}
-      AUTH_ALLOWED_ORIGINS: ${{ vars.AUTH_ALLOWED_ORIGINS }}
+      # Pin the browser origin used by the public deployment. Without this,
+      # a stale or differently configured APP_URL on a Vercel instance causes
+      # valid password-link submissions to fail the CSRF origin check.
+      AUTH_ALLOWED_ORIGINS: ${{ vars.AUTH_ALLOWED_ORIGINS || 'https://trackr-alerts.vercel.app' }}
       SECRET_KEY: ${{ secrets.SECRET_KEY }}
       ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
       ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL || secrets.SMTP_USER }}
