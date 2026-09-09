@@ -81,5 +81,7 @@ async def session_headers(request, call_next):
         set_session_cookie(response, *renewal)
     if request.url.path.startswith(('/auth/', '/login')) or request.cookies.get(COOKIE) or response.headers.getlist('set-cookie'):
         response.headers['Cache-Control'] = 'no-store'
-        response.headers['Referrer-Policy'] = 'no-referrer'
+        # Preserve a concrete Origin for same-site form POSTs while keeping
+        # authentication URLs out of cross-site requests and external links.
+        response.headers['Referrer-Policy'] = 'same-origin'
     return response
