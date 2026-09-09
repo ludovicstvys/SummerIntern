@@ -55,7 +55,10 @@ jobs:
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
       NOTION_SYNC_ENABLED: ${{ vars.NOTION_SYNC_ENABLED || 'false' }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
-      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL }}
+      # Prefer a direct database connection for schema changes. The pooled runtime
+      # URL is a safe fallback so a missing optional secret cannot strand workers
+      # on a schema that their checked-out code no longer supports.
+      MIGRATION_DATABASE_URL: ${{ secrets.MIGRATION_DATABASE_URL || secrets.DATABASE_URL }}
       APP_URL: ${{ vars.APP_URL || 'https://trackr-alerts.vercel.app' }}
       ALLOWED_HOSTS: ${{ vars.ALLOWED_HOSTS }}
       AUTH_ALLOWED_ORIGINS: ${{ vars.AUTH_ALLOWED_ORIGINS }}
