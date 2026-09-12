@@ -123,7 +123,7 @@ def test_postgres_concurrent_collectors_preserve_one_delivery(pg):
         assert db.query(Offer).count() == db.query(OfferSource).count() == db.query(Delivery).count() == 1
 
 
-def test_postgres_concurrent_invites_create_one_account_and_mail(pg):
+def test_postgres_concurrent_invites_create_one_account_and_queue_mail(pg):
     from fastapi.testclient import TestClient
     from trackr_app.main import app
     from trackr_app.database import get_db
@@ -140,23 +140,18 @@ def test_postgres_concurrent_invites_create_one_account_and_mail(pg):
         client = TestClient(app)
         client.cookies.set('trackr_session', 'session')
         return client.post('/admin/invite', data={'email': 'invited@example.com', 'csrf_token': 'csrf'}, follow_redirects=False).status_code
-    entered, release = Event(), Event()
-    def sender(*args):
-        entered.set(); assert release.wait(10)
     app.dependency_overrides[get_db] = dependency
     try:
-        with patch('trackr_app.main.send_magic_link', side_effect=sender) as send, ThreadPoolExecutor(max_workers=2) as pool:
+        with ThreadPoolExecutor(max_workers=2) as pool:
             first = pool.submit(invite)
-            try:
-                assert entered.wait(10)
-                second = pool.submit(invite)
-            finally:
-                release.set()
+            second = pool.submit(invite)
             assert first.result(timeout=10) == second.result(timeout=10) == 303
-        assert send.call_count == 1
         with Session() as db:
             assert db.query(User).filter_by(email='invited@example.com').count() == 1
-            assert db.query(Invitation).count() == 1
+            invitation = db.query(Invitation).one()
+            assert invitation.delivery_status == 'pending'
+            from trackr_app.models import AuthMail
+            assert db.query(AuthMail).count() == 0
     finally:
         app.dependency_overrides.clear()
 

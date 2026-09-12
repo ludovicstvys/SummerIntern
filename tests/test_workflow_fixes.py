@@ -67,9 +67,12 @@ def test_smtp_backoff_defers_retry(db, user, offer):
 
 
 def test_failed_invitation_retries_with_fresh_link(client, db):
-    with patch('trackr_app.main.send_magic_link', side_effect=RuntimeError()):
-        client.post('/admin/invite', data={'csrf_token': 'csrf', 'email': 'retry@example.com'})
+    client.post('/admin/invite', data={'csrf_token': 'csrf', 'email': 'retry@example.com'})
     invitation = db.query(Invitation).one()
+    assert invitation.delivery_status == 'pending' and invitation.attempts == 0
+    assert db.query(MagicLink).count() == 0
+    with patch('trackr_app.invitations.send_magic_link', side_effect=RuntimeError()):
+        assert process_invitations(db) == 0
     assert invitation.delivery_status == 'pending' and invitation.attempts == 1
     assert db.query(MagicLink).count() == 1  # SMTP acceptance may be uncertain.
     invitation.next_attempt_at = utcnow() - timedelta(seconds=1); db.commit()

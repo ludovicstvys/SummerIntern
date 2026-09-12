@@ -87,12 +87,10 @@ def test_csrf_form_is_bound_to_browser(auth_env):
 @pytest.mark.parametrize('path,kind', [('/auth/password/request', 'password'), ('/auth/request', 'magic')])
 def test_request_queues_known_and_unknown_without_smtp_or_user_lookup(auth_env, path, kind):
     client, factory, _ = auth_env
-    target = 'trackr_app.auth.deliver_in_background' if kind == 'password' else 'trackr_app.main.deliver_in_background'
-    with patch(target) as background, patch('trackr_app.auth_mail.send_password_link') as reset, patch('trackr_app.auth_mail.send_magic_link') as magic:
+    with patch('trackr_app.auth_mail.send_password_link') as reset, patch('trackr_app.auth_mail.send_magic_link') as magic:
         known = client.post(path, data=auth_form(client, email='member@example.com'), follow_redirects=False)
         unknown = client.post(path, data=auth_form(client, email='absent@example.com'), follow_redirects=False)
         assert known.headers['location'] == unknown.headers['location']
-        assert background.call_count == 2
         reset.assert_not_called(); magic.assert_not_called()
     with factory() as db:
         assert db.query(AuthMail).filter_by(status='pending', kind=kind).count() == 2
@@ -174,7 +172,7 @@ def test_recovery_and_magic_link_report_shared_mail_quota(auth_env):
     with patch('trackr_app.limits.utcnow', return_value=utcnow()), patch('trackr_app.auth_mail.send_magic_link') as magic, patch('trackr_app.auth_mail.send_password_link') as reset:
         client.post('/auth/request', data=data, follow_redirects=False)
         response = client.post('/auth/password/request', data=data, follow_redirects=False)
-    assert magic.call_count == 1 and reset.call_count == 0
+    magic.assert_not_called(); reset.assert_not_called()
     assert 'Too%20many%20requests' in response.headers['location']
     assert response.headers['Retry-After'] == '900'
 
@@ -206,7 +204,7 @@ def test_return_destination_rejects_external_and_unsafe_paths(auth_env, destinat
     assert login(client).headers['location'] == '/dashboard'
 
 
-def test_smtp_runs_only_after_http_response_body(auth_env):
+def test_password_request_only_queues_before_http_response_body(auth_env):
     import anyio
     from urllib.parse import urlencode
     from trackr_app.main import app
@@ -223,8 +221,6 @@ def test_smtp_runs_only_after_http_response_body(auth_env):
         await anyio.sleep_forever()
     async def send(message):
         events.append(message)
-    def sender(*args):
-        assert any(event['type'] == 'http.response.body' and not event.get('more_body') for event in events)
     scope = {'type': 'http', 'asgi': {'version': '3.0', 'spec_version': '2.4'}, 'http_version': '1.1',
              'method': 'POST', 'scheme': 'http', 'path': '/auth/password/request',
              'raw_path': b'/auth/password/request', 'query_string': b'', 'root_path': '',
@@ -234,12 +230,12 @@ def test_smtp_runs_only_after_http_response_body(auth_env):
     async def run():
         with anyio.fail_after(5):
             await app(scope, receive, send)
-    with patch('trackr_app.auth_mail.send_password_link', side_effect=sender) as smtp:
+    with patch('trackr_app.auth_mail.send_password_link') as smtp:
         anyio.run(run)
-    assert smtp.call_count == 1
-    # A failure inside the sender is caught by the outbox; inspect its durable state too.
+    assert any(event['type'] == 'http.response.body' and not event.get('more_body') for event in events)
+    smtp.assert_not_called()
     with auth_env[1]() as db:
-        assert db.query(AuthMail).one().status == 'sent'
+        assert db.query(AuthMail).one().status == 'pending'
 
 
 def test_mail_retry_budget_is_bounded_and_unknown_accounts_never_receive_mail(auth_env):
@@ -278,7 +274,7 @@ def test_monitoring_reports_delayed_and_failed_auth_mail(auth_env):
     _, factory, _ = auth_env
     with factory() as db:
         delayed = enqueue(db, 'member@example.com', 'password')
-        delayed.created_at = utcnow() - timedelta(minutes=16)
+        delayed.created_at = utcnow() - timedelta(minutes=31)
         failed = enqueue(db, 'member@example.com', 'magic'); failed.status = 'failed'
         db.commit()
         status = operational_status(db)

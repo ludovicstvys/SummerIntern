@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from tests.test_audit import db, user, client, offer
 from trackr_app.models import Delivery, User, UserOffer, UserSession
+from trackr_app.invitations import process_invitations
 from trackr_app.preferences import activate_preference, queue_new_offer
 from trackr_app.scraper import scrape_all
 from trackr_app.workers import process_immediate_alerts
@@ -14,8 +15,10 @@ from trackr_common import scrape_open_programmes, canonical_offer_url
 
 
 def test_invitation_login_activation_scrape_delivery_logout(client, db, user):
-    with patch('trackr_app.main.send_magic_link') as mail:
+    with patch('trackr_app.invitations.send_magic_link') as mail:
         response = client.post('/admin/invite', data={'csrf_token': 'csrf', 'email': 'new@example.com'}, follow_redirects=False)
+        mail.assert_not_called()
+        assert process_invitations(db) == 1
     assert response.status_code == 303
     target = db.scalar(select(User).where(User.email == 'new@example.com'))
     assert target.preference.status == 'draft'
@@ -41,9 +44,11 @@ def test_invitation_login_activation_scrape_delivery_logout(client, db, user):
     assert client.get('/dashboard', follow_redirects=False).headers['location'] == '/login'
 
 
-def test_invitation_failure_is_visible(client):
-    with patch('trackr_app.main.send_magic_link', side_effect=RuntimeError('SMTP unavailable')):
-        response = client.post('/admin/invite', data={'csrf_token': 'csrf', 'email': 'failed@example.com'})
+def test_invitation_failure_is_visible(client, db):
+    client.post('/admin/invite', data={'csrf_token': 'csrf', 'email': 'failed@example.com'})
+    with patch('trackr_app.invitations.send_magic_link', side_effect=RuntimeError('SMTP unavailable')):
+        assert process_invitations(db) == 0
+    response = client.get('/admin')
     assert 'delivery failed' in response.text.lower()
 
 

@@ -24,7 +24,7 @@ def operational_status(db):
     failures = db.scalar(select(func.count()).select_from(Delivery).where(Delivery.status == 'failed'))
     failures += db.scalar(select(func.count()).select_from(Invitation).where(Invitation.delivery_status == 'failed'))
     failures += db.scalar(select(func.count()).select_from(AuthMail).where(AuthMail.status == 'failed', AuthMail.invitation_id.is_(None)))
-    auth_delayed = db.scalar(select(func.count()).select_from(AuthMail).where(AuthMail.status.in_(['pending', 'processing']), AuthMail.created_at < now-timedelta(minutes=15)))
+    auth_delayed = db.scalar(select(func.count()).select_from(AuthMail).where(AuthMail.status.in_(['pending', 'processing']), AuthMail.created_at < now-timedelta(minutes=30)))
     if settings.notion_available:
         failures += db.scalar(select(func.count()).select_from(NotionSync).where(NotionSync.status == 'failed'))
     from .legacy import legacy_notion_enabled

@@ -4,7 +4,7 @@ import subprocess
 import time
 from pathlib import Path
 
-NAMES = ['platform-jobs.yml', 'scrape.yml', 'authentication.yml', 'collection.yml', 'maintenance.yml']
+NAMES = ['platform-jobs.yml', 'scrape.yml', 'email-delivery.yml', 'collection.yml', 'maintenance.yml']
 STATE = Path('.worker-schedules.json')
 
 

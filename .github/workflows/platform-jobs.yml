@@ -4,7 +4,7 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 concurrency:
-  group: trackr-deliveries
+  group: trackr-platform-jobs
   cancel-in-progress: false
 permissions:
   contents: read
@@ -45,14 +45,6 @@ jobs:
         id: setup
         continue-on-error: true
         run: timeout 100s python -m trackr_app.cli process-notion-setup
-      - name: Send immediate alerts
-        id: immediate
-        continue-on-error: true
-        run: timeout 150s python -m trackr_app.cli process-immediate-alerts
-      - name: Send daily digests
-        id: digests
-        continue-on-error: true
-        run: timeout 150s python -m trackr_app.cli process-digests
       - name: Sync personal Notion databases when enabled
         id: notion
         continue-on-error: true
@@ -62,5 +54,5 @@ jobs:
         continue-on-error: true
         run: python -m trackr_app.cli check-operations
       - name: Report processing failure
-        if: steps.matches.outcome == 'failure' || steps.setup.outcome == 'failure' || steps.immediate.outcome == 'failure' || steps.digests.outcome == 'failure' || steps.notion.outcome == 'failure' || steps.operations.outcome == 'failure'
+        if: steps.matches.outcome == 'failure' || steps.setup.outcome == 'failure' || steps.notion.outcome == 'failure' || steps.operations.outcome == 'failure'
         run: exit 1

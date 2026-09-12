@@ -4,10 +4,7 @@ from datetime import timedelta
 import time
 
 from sqlalchemy import select, or_, update, case
-from sqlalchemy.orm import Session
-
 from .config import settings
-from .database import SessionLocal
 from .emailing import send_magic_link, send_password_link
 from .models import AuthMail, Invitation, MagicLink, PasswordToken, User, utcnow
 from .operations import error_code, next_retry
@@ -126,15 +123,6 @@ def process_auth_mail(db, job_id, sender=None):
     sent = job.status == 'sent'
     db.commit()
     return sent
-
-
-def deliver_in_background(job_id, bind=None):
-    try:
-        with (Session(bind=bind, expire_on_commit=False) if bind is not None else SessionLocal()) as db:
-            process_auth_mail(db, job_id)
-    except Exception as exc:
-        # A durable pending job or expired lease will be picked up by the scheduler.
-        print(f'Auth delivery deferred: {error_code(exc)}')
 
 
 @guarded(auth=True)

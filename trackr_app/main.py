@@ -7,7 +7,7 @@ from urllib.parse import quote
 from zoneinfo import available_timezones
 
 from email_validator import EmailNotValidError, validate_email
-from fastapi import BackgroundTasks, Depends, FastAPI, Form, HTTPException, Request
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -18,18 +18,16 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import Base, SessionLocal, engine, get_db
-from .emailing import send_magic_link
 from .models import Delivery, Invitation, MagicLink, NotionSync, Offer, OfferSource, Preference, User, UserOffer, UserSession, WorkerState, utcnow
 from .notion import accessible_pages, create_offer_database, exchange_code, oauth_url, save_connection, recover_database
 from .preferences import PROGRAM_TYPES, REGIONS, activate_preference, matching_offers, offer_matches, offer_is_open
 from .opportunities import browse_database, browse_opportunities, opportunity_card, relevant_sources
 from .operations import insert_for, error_code
-from .invitations import deliver_invitation
 from .security import token_hash, new_token
 from .limits import allow_login
 from .auth import (router as auth_router, auth_page, check_form, client_ip, AuthFormError,
                    login_redirect, login_required, limited_response, RECOVERY_MESSAGE, RETURN_COOKIE)
-from .auth_mail import enqueue, deliver_in_background
+from .auth_mail import enqueue
 from .sessions import current_user, create_session, set_session_cookie, session_headers, valid_session, revoke_user_auth
 from .health import SCHEMA_REVISION, WEB_COMPATIBLE_SCHEMAS
 
@@ -133,16 +131,15 @@ def login_page(request: Request, db: Session = Depends(get_db)):
 
 
 @app.post("/auth/request")
-def request_link(request: Request, background_tasks: BackgroundTasks, email: str = Form(...), form_token: str = Form(""), db: Session = Depends(get_db)):
+def request_link(request: Request, email: str = Form(...), form_token: str = Form(""), db: Session = Depends(get_db)):
     check_form(request, form_token)
     normalized = email.strip().lower()
     if len(normalized) > 320:
         return RedirectResponse('/login?message=' + quote(RECOVERY_MESSAGE), 303)
     if not allow_login(db, normalized, client_ip(request)):
         return limited_response('/login')
-    job = enqueue(db, normalized, 'magic')
+    enqueue(db, normalized, 'magic')
     db.commit()
-    background_tasks.add_task(deliver_in_background, job.id, db.get_bind())
     return RedirectResponse('/login?message=' + quote(RECOVERY_MESSAGE), 303)
 
 
@@ -305,7 +302,6 @@ def invite(request: Request, email: str = Form(...), csrf_token: str = Form(...)
         invitation.last_error, invitation.next_attempt_at = None, None
         invitation.created_at = utcnow()
     db.commit()
-    deliver_invitation(db, invitation.id, sender=send_magic_link)
     return RedirectResponse("/admin", 303)
 
 

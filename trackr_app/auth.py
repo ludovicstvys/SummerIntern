@@ -5,7 +5,7 @@ from ipaddress import ip_address
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from itsdangerous import BadSignature, URLSafeTimedSerializer
@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import get_db
-from .auth_mail import enqueue, deliver_in_background
+from .auth_mail import enqueue
 from .limits import allow_login, reserve_password_login, refund_password_login
 from .models import Invitation, PasswordToken, User, utcnow
 from .security import new_token, token_hash
@@ -202,7 +202,7 @@ def password_request_page(request: Request):
 
 
 @router.post('/auth/password/request')
-def password_request(request: Request, background_tasks: BackgroundTasks, email: str = Form(...), form_token: str = Form(''),
+def password_request(request: Request, email: str = Form(...), form_token: str = Form(''),
                      db: Session = Depends(get_db)):
     check_form(request, form_token)
     email = email.strip().lower()
@@ -211,9 +211,8 @@ def password_request(request: Request, background_tasks: BackgroundTasks, email:
         return response
     if not allow_login(db, email, client_ip(request)):
         return limited_response('/auth/password/request')
-    job = enqueue(db, email, 'password')
+    enqueue(db, email, 'password')
     db.commit()
-    background_tasks.add_task(deliver_in_background, job.id, db.get_bind())
     return response
 
 

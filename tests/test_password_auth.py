@@ -14,7 +14,7 @@ from tests.auth_helpers import auth_form, consume
 from trackr_app.auth import passwords
 from trackr_app.database import Base, get_db
 from trackr_app.main import app
-from trackr_app.models import Invitation, MagicLink, PasswordToken, User, UserSession, utcnow
+from trackr_app.models import AuthMail, Invitation, MagicLink, PasswordToken, User, UserSession, utcnow
 from trackr_app.security import token_hash
 from trackr_app.sessions import aware
 
@@ -124,11 +124,10 @@ def test_login_limits_separate_from_email_limits(auth_env):
             client.post('/auth/login', data=data, follow_redirects=False)
         data['password'] = PASSWORD
         assert client.post('/auth/login', data=data, follow_redirects=False).headers['location'].startswith('/login?')
-        with patch('trackr_app.auth_mail.send_password_link') as sender:
-            client.post('/auth/password/request', data=data, follow_redirects=False)
-            assert sender.call_count == 1
+        client.post('/auth/password/request', data=data, follow_redirects=False)
     with factory() as db:
         assert db.query(UserSession).count() == 0
+        assert db.query(AuthMail).filter_by(kind='password', status='pending').count() == 1
 
 
 def test_password_email_and_generic_response(auth_env):
@@ -137,6 +136,12 @@ def test_password_email_and_generic_response(auth_env):
         known = client.post('/auth/password/request', data=auth_form(client, email='member@example.com'), follow_redirects=False)
         unknown = client.post('/auth/password/request', data=auth_form(client, email='unknown@example.com'), follow_redirects=False)
         assert known.headers['location'] == unknown.headers['location']
+        sender.assert_not_called()
+        with factory() as db:
+            from trackr_app.auth_mail import process_auth_queue
+            assert db.query(AuthMail).count() == 2
+            assert db.query(PasswordToken).count() == 0
+            assert process_auth_queue(db) == 1
         assert sender.call_count == 1
         url = sender.call_args.args[1]
     with factory() as db:
@@ -146,6 +151,9 @@ def test_password_email_and_generic_response(auth_env):
         db.get(User, user_id).is_active = False; db.commit()
     with patch('trackr_app.auth_mail.send_password_link') as sender:
         client.post('/auth/password/request', data=auth_form(client, email='member@example.com'))
+        with factory() as db:
+            from trackr_app.auth_mail import process_auth_queue
+            assert process_auth_queue(db) == 0
         sender.assert_not_called()
 
 
@@ -153,11 +161,13 @@ def test_mail_failure_is_generic_and_never_logs_token(auth_env, capsys):
     client, _, _ = auth_env
     with patch('trackr_app.auth_mail.send_password_link', side_effect=RuntimeError('secret-token')):
         response = client.post('/auth/password/request', data=auth_form(client, email='member@example.com'), follow_redirects=False)
+        with auth_env[1]() as db:
+            from trackr_app.auth_mail import process_auth_queue
+            assert process_auth_queue(db) == 0
     assert response.status_code == 303
     output = capsys.readouterr().out
     assert 'secret-token' not in output
     with auth_env[1]() as db:
-        from trackr_app.models import AuthMail
         job = db.query(AuthMail).one()
         assert job.status == 'pending' and job.last_error == 'RuntimeError'
 

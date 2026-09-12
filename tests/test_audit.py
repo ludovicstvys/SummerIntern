@@ -13,7 +13,7 @@ from sqlalchemy.pool import StaticPool
 
 from trackr_app.database import Base, get_db
 from trackr_app.main import app
-from trackr_app.models import Delivery, MagicLink, PasswordToken, NotionConnection, NotionSync, Offer, Preference, User, UserOffer, UserSession, utcnow
+from trackr_app.models import AuthMail, Delivery, MagicLink, PasswordToken, NotionConnection, NotionSync, Offer, Preference, User, UserOffer, UserSession, utcnow
 from trackr_app.security import token_hash, expires_in, encrypt
 from trackr_app.preferences import activate_preference
 from trackr_app.workers import process_digests, process_immediate_alerts
@@ -88,21 +88,20 @@ def test_invalid_time_is_form_error(client, user, path, value):
 
 
 def test_login_limits_apply_to_known_and_unknown_addresses(client, db, user):
-    with patch('trackr_app.auth_mail.send_magic_link') as send:
-        responses = [client.post('/auth/request', data=auth_form(client, email=user.email), follow_redirects=False) for _ in range(3)]
-        unknown = client.post('/auth/request', data=auth_form(client, email='unknown@example.com'), follow_redirects=False)
-    assert send.call_count == 1
+    responses = [client.post('/auth/request', data=auth_form(client, email=user.email), follow_redirects=False) for _ in range(3)]
+    unknown = client.post('/auth/request', data=auth_form(client, email='unknown@example.com'), follow_redirects=False)
     assert responses[0].headers['location'] == unknown.headers['location']
     assert all(response.headers.get('Retry-After') == '900' for response in responses[1:])
-    assert db.query(MagicLink).count() == 1
+    assert db.query(AuthMail).count() == 2
+    assert db.query(MagicLink).count() == 0
 
 
 def test_ip_limit_covers_distinct_invited_addresses(client, db):
     for i in range(21): db.add(User(email=f'p{i}@example.com'))
     db.commit()
-    with patch('trackr_app.auth_mail.send_magic_link') as send:
-        for i in range(21): client.post('/auth/request', data=auth_form(client, email=f'p{i}@example.com'))
-    assert send.call_count == 20
+    for i in range(21): client.post('/auth/request', data=auth_form(client, email=f'p{i}@example.com'))
+    assert db.query(AuthMail).count() == 20
+    assert db.query(MagicLink).count() == 0
 
 
 def test_production_logs_never_include_magic_link(client, user, capsys):
