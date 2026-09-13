@@ -1,4 +1,4 @@
-from .runtime import guarded
+from .runtime import WORK_BUDGET_SECONDS, guarded
 """Durable auth delivery with short leases and fresh, persisted tokens per attempt."""
 from datetime import timedelta
 import time
@@ -127,7 +127,7 @@ def process_auth_mail(db, job_id, sender=None):
 
 @guarded(auth=True)
 def process_auth_queue(db, deadline=None):
-    deadline = deadline or time.monotonic() + 90
+    deadline = deadline or time.monotonic() + WORK_BUDGET_SECONDS
     now = utcnow()
     ids = db.scalars(select(AuthMail.id).where(
         or_(AuthMail.status == 'pending',

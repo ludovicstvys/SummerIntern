@@ -20,8 +20,6 @@ def test_compatible_bridge_is_verified_before_migration(monkeypatch):
     with (patch('scripts.release.settings', SimpleNamespace(app_url='https://canonical.example', migration_database_url='postgresql://test')),
         patch('scripts.release.previous', return_value=('https://old.vercel.app', {'commit': 'old-commit'})),
         patch('scripts.release.vercel', side_effect=vercel), patch('scripts.release.verify', side_effect=verify),
-        patch('scripts.release.pause', side_effect=lambda: events.append(('pause',))),
-        patch('scripts.release.resume', side_effect=lambda: events.append(('resume',))),
         patch('scripts.release.create_engine'), patch('scripts.release.migrate', side_effect=migration)):
         release()
     assert events.index(('verify', 'https://canonical.example', None, False)) < events.index(('migrate',))
@@ -29,7 +27,7 @@ def test_compatible_bridge_is_verified_before_migration(monkeypatch):
     assert '--prebuilt' not in deploy
     assert '--prod' in deploy and '--skip-domain' not in deploy
     assert events.count(('verify', 'https://canonical.example', None, False)) == 2
-    assert events[-1] == ('resume',)
+    assert events[-1] == ('verify', 'https://canonical.example', None, False)
 
 
 def test_candidate_smoke_request_uses_vercel_curl(monkeypatch):

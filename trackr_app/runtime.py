@@ -13,6 +13,12 @@ from .operations import lock_state
 
 _active = ContextVar('runtime_lease', default=False)
 
+# Commands get a soft budget so they can persist queue state and release their
+# runtime lease before the CLI's hard alarm.  GitHub's shortest shell timeout is
+# 100 seconds, leaving another ten seconds after the hard alarm as a last resort.
+WORK_BUDGET_SECONDS = 80
+HARD_TIMEOUT_SECONDS = 90
+
 
 @contextmanager
 def invocation(db, auth=False):

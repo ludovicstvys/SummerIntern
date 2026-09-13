@@ -16,27 +16,34 @@ from .preferences import activate_preference
 from .scraper import scrape_all
 from .workers import process_digests, process_immediate_alerts, sync_notion
 from .legacy import reconcile_summer_snapshot, cancel_legacy_notion_window, sync_last_email_offers
+from .runtime import HARD_TIMEOUT_SECONDS, WORK_BUDGET_SECONDS, invocation
+
+
+AUTH_COMPATIBLE_COMMANDS = frozenset(('process-auth-mail', 'process-invitations'))
 
 
 def run_command(command):
     from .operations import error_code
+    # The migration coordinator waits for this outer lease.  Keep it alive for
+    # execution-state writes and all command-specific database work; narrower
+    # worker decorators then reuse it through runtime's context variable.
     with SessionLocal() as db:
-        state = lock_state(db, 'execution/' + command)
-        state.last_success_at, state.last_error = utcnow(), 'running'
-        db.commit()
-    failure = None
-    try:
-        result = _run_command(command)
-        failure = 'ProcessingErrors' if result else None
-        return result
-    except Exception as exc:
-        failure = error_code(exc)
-        raise
-    finally:
-        with SessionLocal() as db:
+        with invocation(db, auth=command in AUTH_COMPATIBLE_COMMANDS):
             state = lock_state(db, 'execution/' + command)
-            state.last_error = failure
+            state.last_success_at, state.last_error = utcnow(), 'running'
             db.commit()
+            failure = None
+            try:
+                result = _run_command(command)
+                failure = 'ProcessingErrors' if result else None
+                return result
+            except Exception as exc:
+                failure = error_code(exc)
+                raise
+            finally:
+                state = lock_state(db, 'execution/' + command)
+                state.last_error = failure
+                db.commit()
 
 
 def _run_command(command):
@@ -56,7 +63,7 @@ def _run_command(command):
             return 0
         if command in ('process-matches', 'process-notion-setup'):
             kind = 'match' if command == 'process-matches' else 'notion-create'
-            deadline = time.monotonic() + 90
+            deadline = time.monotonic() + WORK_BUDGET_SECONDS
             count = process_jobs(db, kind, deadline)
             if kind == 'match':
                 while time.monotonic() < deadline:
@@ -162,6 +169,13 @@ def maintenance(args):
     return 0
 
 
+def run_maintenance(args):
+    """Run administrative commands under the same migration drain lease."""
+    with SessionLocal() as db:
+        with invocation(db, auth=False):
+            return maintenance(args)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Trackr Alerts background commands")
     parser.add_argument("command", choices=("scrape-all", "process-immediate-alerts", "process-digests", "digest-worker", "sync-notion", 'process-invitations', 'process-auth-mail', 'process-matches', 'process-notion-setup', 'purge', 'retry-failed', 'promote-admin', 'import-legacy-subscribers', 'check-operations', 'reconcile-legacy-summer', 'sync-last-email-offers', 'remediate-legacy-notion'))
@@ -175,7 +189,7 @@ def main():
     args = parser.parse_args()
     command = args.command
     if command in ('retry-failed', 'promote-admin', 'import-legacy-subscribers', 'check-operations', 'reconcile-legacy-summer', 'sync-last-email-offers', 'remediate-legacy-notion'):
-        raise SystemExit(maintenance(args))
+        raise SystemExit(run_maintenance(args))
     if command == "digest-worker":
         while True:
             try:
@@ -187,7 +201,7 @@ def main():
     def deadline_reached(signum, frame):
         raise TimeoutError('InvocationDeadlineExceeded')
     signal.signal(signal.SIGALRM, deadline_reached)
-    signal.alarm(90)
+    signal.alarm(HARD_TIMEOUT_SECONDS)
     try:
         status = run_command(command)
     except Exception as exc:

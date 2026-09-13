@@ -1,7 +1,12 @@
 name: Trackr platform jobs
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    # Fallback for queued work that did not originate from a collection run.
+    - cron: "4-59/5 * * * *"
+  workflow_run:
+    workflows: ["Trackr source collection"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 concurrency:
   group: trackr-platform-jobs

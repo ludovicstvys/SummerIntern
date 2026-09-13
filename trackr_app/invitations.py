@@ -4,6 +4,7 @@ from sqlalchemy import select, or_
 from .auth_mail import enqueue, process_auth_mail
 from .emailing import send_magic_link
 from .models import AuthMail, Invitation, User, utcnow
+from .runtime import WORK_BUDGET_SECONDS
 
 
 def deliver_invitation(db, invitation_id, sender=None):
@@ -36,7 +37,7 @@ def deliver_invitation(db, invitation_id, sender=None):
 
 
 def process_invitations(db):
-    deadline = time.monotonic() + 90
+    deadline = time.monotonic() + WORK_BUDGET_SECONDS
     ids = db.scalars(select(Invitation.id).where(Invitation.delivery_status == 'pending',
         Invitation.accepted_at.is_(None), or_(Invitation.next_attempt_at.is_(None),
         Invitation.next_attempt_at <= utcnow())).order_by(Invitation.id).limit(20)).all()

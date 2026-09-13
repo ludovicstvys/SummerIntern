@@ -10,7 +10,6 @@ concurrency:
   cancel-in-progress: false
 permissions:
   contents: read
-  actions: write
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -97,6 +96,3 @@ jobs:
         run: python scripts/configure_vercel.py
       - name: Deploy remote-built candidate, migrate, promote and verify rollback on failure
         run: python scripts/release.py
-      - name: Restore worker schedules after runner failure
-        if: always()
-        run: python scripts/worker_schedules.py resume

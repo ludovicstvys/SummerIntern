@@ -11,18 +11,18 @@ from .security import new_token
 from .sessions import aware
 
 
-def enqueue_job(db, key, kind, payload):
+def enqueue_job(db, key, kind, payload, supersede=False):
     encoded = json.dumps(payload, sort_keys=True)
     db.execute(insert_for(db, DurableJob).values(key=key, kind=kind, payload=encoded)
         .on_conflict_do_nothing(index_elements=['key']))
     job = db.get(DurableJob, key, with_for_update=True, populate_existing=True)
-    if kind == 'match' and job.status == 'pending' and job.payload == encoded:
+    if kind == 'match' and not supersede and job.status == 'pending' and job.payload == encoded:
         return job
     if kind == 'match' and job.status in ('pending', 'processing') and json.loads(job.payload).get('updated'):
         payload['updated'] = True
         encoded = json.dumps(payload, sort_keys=True)
     job.payload, job.status, job.cursor = encoded, 'pending', 0
-    job.attempts, job.last_error, job.completed_at = 0, None, None
+    job.attempts, job.last_error, job.next_attempt_at, job.completed_at = 0, None, None, None
     # A superseded network attempt must finish/expire before replacement begins.
     return job
 
@@ -40,21 +40,35 @@ def process_jobs(db, kind='notion-create', deadline=None):
     for key in ids:
         if time.monotonic() >= deadline:
             break
+        # Claims are per job. Keeping a token from a prior batch could make an
+        # unrelated pending job look like the failed attempt that owns it.
+        db.info.pop('match_claim', None)
         try:
             if kind == 'notion-create':
                 count += create_notion(db, key)
             elif kind == 'match':
                 count += match_batch(db, key)
         except Exception as exc:
+            claim = db.info.pop('match_claim', None) if kind == 'match' else None
             db.rollback()
             job = db.get(DurableJob, key, with_for_update=True)
-            if job and (job.status == 'pending' or (kind == 'match' and job.status == 'processing' and job.lease_token == db.info.get('match_claim'))):
-                if job.status == 'pending':
+            if job and kind == 'match' and claim and job.lease_token == claim:
+                job.lease_until, job.lease_token = None, None
+                # enqueue_job has already initialized a superseding pending
+                # generation. The old worker may only release its former lease;
+                # its exception must not add attempts or retry state to the new job.
+                if job.status == 'processing':
+                    job.status = 'failed' if job.attempts >= 5 else 'pending'
+                    job.last_error, job.next_attempt_at = error_code(exc), next_retry(job.attempts)
+            elif job and job.status == 'pending' and claim is None:
+                if kind == 'match' or kind == 'notion-create':
                     job.attempts += 1
                 job.lease_until = None
                 job.status = 'failed' if job.attempts >= 5 else 'pending'
                 job.last_error, job.next_attempt_at = error_code(exc), next_retry(job.attempts)
             db.commit()
+        finally:
+            db.info.pop('match_claim', None)
     return count
 
 
@@ -151,6 +165,10 @@ def match_batch(db, key):
             else:
                 payload['phase'] = 'offers'
                 job.payload, job.cursor = json.dumps(payload, sort_keys=True), 0
+        elif job.lease_token == token:
+            # A producer superseded this generation while its batch was running.
+            # Leave replacement state untouched and only release the old claim.
+            job.lease_until, job.lease_token = None, None
         db.commit()
         return max(1, len(batch))
     if 'offer_id' in payload:
@@ -184,6 +202,10 @@ def match_batch(db, key):
         db.flush()
     job = db.get(DurableJob, key, with_for_update=True, populate_existing=True)
     if job.status != 'processing' or job.lease_token != token:
+        if job.lease_token == token:
+            # enqueue_job deliberately retains the active token so the
+            # replacement cannot start concurrently with this generation.
+            job.lease_until, job.lease_token = None, None
         db.commit(); return len(pairs)
     job.status, job.lease_until, job.attempts = 'pending', None, 0
     # A successful retry must clear its former transient failure.  Otherwise
@@ -194,4 +216,6 @@ def match_batch(db, key):
     else:
         job.status, job.completed_at = 'done', utcnow()
     db.commit()
-    return len(pairs)
+    # Finalizing a job is progress too. Returning zero here made the caller stop
+    # after closing its first 100 jobs, even when later match jobs were waiting.
+    return max(1, len(pairs))

@@ -1,7 +1,7 @@
 import json
 import time
 import os
-from .runtime import guarded
+from .runtime import WORK_BUDGET_SECONDS, guarded
 from .sources import reserve, owned
 from .durable import enqueue_job, process_jobs
 from datetime import date
@@ -49,11 +49,28 @@ def _date(value):
     return date.fromisoformat(value) if value else None
 
 
+def _offer_revision(offer: Offer):
+    """Return all fields that can change matching or downstream presentation."""
+    source_scope = tuple(sorted(
+        (
+            source.region,
+            source.programme_type,
+            source.season,
+            source.is_open,
+            source.start_term,
+            source.opening_date.isoformat() if source.opening_date else None,
+            source.closing_date.isoformat() if source.closing_date else None,
+        )
+        for source in offer.sources
+    ))
+    return offer_properties(offer), source_scope
+
+
 @guarded()
 def scrape_all(db: Session) -> dict[str, int]:
     seen = set()
     totals = dict(created=0, updated=0, closed=0, failed_trackers=0)
-    deadline = time.monotonic() + 90
+    deadline = time.monotonic() + WORK_BUDGET_SECONDS
     trackers = [TRACKERS[int(os.environ['TRACKR_SOURCE_INDEX'])]] if 'TRACKR_SOURCE_INDEX' in os.environ else TRACKERS
     for params in trackers:
         if time.monotonic() >= deadline:
@@ -110,7 +127,7 @@ def scrape_all(db: Session) -> dict[str, int]:
                 if is_new:
                     offer = Offer(canonical_url=canonical, offer_url=canonical, name=item['name'], region=params['region'], programme_type=kind)
                     db.add(offer)
-                before = offer_properties(offer) if not is_new else None
+                before = _offer_revision(offer) if not is_new else None
                 source = next((s for s in offer.sources if (s.region, s.programme_type, s.season) == (params['region'], kind, season)), None)
                 if source is None:
                     source = OfferSource(region=params['region'], programme_type=kind, season=season)
@@ -138,7 +155,7 @@ def scrape_all(db: Session) -> dict[str, int]:
                 offer = db.get(Offer, source.offer_id)
                 if offer.canonical_url in tracker_seen:
                     continue
-                before = offer_properties(offer)
+                before = _offer_revision(offer)
                 source.missing_collections += 1
                 if source.missing_collections >= 2:
                     source.is_open = False
@@ -148,11 +165,14 @@ def scrape_all(db: Session) -> dict[str, int]:
                 if was_open and not offer.is_open:
                     delta['closed'] += 1
                 changed[offer.id] = (offer, before)
-            # Stable user locking order inside queue_new_offer. Re-evaluate existing
-            # offers as well, but retain the unique user/offer delivery history.
+            # Only material changes need matching. Re-enqueuing every unchanged
+            # offer reopens completed jobs and lets old offers starve new ones.
             for offer, before in changed.values():
-                enqueue_job(db, f'match-offer/{offer.id}', 'match', {'offer_id': offer.id,
-                    'updated': before is not None and before != offer_properties(offer)})
+                after = _offer_revision(offer)
+                if before is None or before != after:
+                    enqueue_job(db, f'match-offer/{offer.id}', 'match', {
+                        'offer_id': offer.id, 'updated': before is not None,
+                    }, supersede=before is not None)
             snapshot.payload, snapshot.updated_at = json.dumps(raw), utcnow()
             snapshot.lease_until, snapshot.last_error = None, None
             state.last_success_at, state.last_error = utcnow(), None

@@ -1,4 +1,4 @@
-from .runtime import guarded
+from .runtime import WORK_BUDGET_SECONDS, guarded
 from datetime import timedelta
 from zoneinfo import ZoneInfo
 
@@ -110,7 +110,7 @@ def _user_ids(db, mode, deadline):
 
 @guarded(auth=False)
 def process_immediate_alerts(db: Session) -> int:
-    deadline = time.monotonic() + 90
+    deadline = time.monotonic() + WORK_BUDGET_SECONDS
     user_ids = _user_ids(db, "immediate", deadline)
     sent = 0
     for user_id in user_ids:
@@ -137,7 +137,7 @@ def process_immediate_alerts(db: Session) -> int:
 
 @guarded(auth=False)
 def process_digests(db: Session) -> int:
-    deadline = time.monotonic() + 90
+    deadline = time.monotonic() + WORK_BUDGET_SECONDS
     user_ids = _user_ids(db, "daily_digest", deadline)
     sent = 0
     for user_id in user_ids:

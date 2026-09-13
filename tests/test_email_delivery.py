@@ -14,10 +14,10 @@ from trackr_app.workers import process_immediate_alerts
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _workflow():
+def _workflow(filename='email-delivery.yml'):
     # BaseLoader keeps GitHub's `on` key as a string rather than YAML 1.1's bool.
     return yaml.load(
-        (ROOT / '.github/workflows/email-delivery.yml').read_text(),
+        (ROOT / '.github/workflows' / filename).read_text(),
         Loader=yaml.BaseLoader,
     )
 
@@ -25,7 +25,7 @@ def _workflow():
 def test_email_delivery_workflow_is_the_single_scheduled_mail_sender():
     workflow = _workflow()
     assert workflow['name'] == 'Trackr email delivery'
-    assert workflow['on']['schedule'] == [{'cron': '*/10 * * * *'}]
+    assert workflow['on']['schedule'] == [{'cron': '6-59/10 * * * *'}]
     assert 'workflow_dispatch' in workflow['on']
 
     job = workflow['jobs']['process']
@@ -51,9 +51,31 @@ def test_email_delivery_workflow_is_the_single_scheduled_mail_sender():
     assert 'process-immediate-alerts' not in platform
     assert 'process-digests' not in platform
 
-    schedules = (ROOT / 'scripts/worker_schedules.py').read_text()
-    assert 'email-delivery.yml' in schedules
-    assert 'authentication.yml' not in schedules
+
+
+def test_collection_matching_and_email_delivery_are_chained():
+    collection = _workflow('collection.yml')
+    platform = _workflow('platform-jobs.yml')
+    email = _workflow('email-delivery.yml')
+
+    assert collection['on']['schedule'] == [{'cron': '2-59/5 * * * *'}]
+    assert platform['on']['workflow_run'] == {
+        'workflows': [collection['name']], 'types': ['completed'], 'branches': ['main'],
+    }
+    assert email['on']['workflow_run'] == {
+        'workflows': [platform['name']], 'types': ['completed'], 'branches': ['main'],
+    }
+    for workflow in (platform, email):
+        assert 'schedule' in workflow['on']
+        assert 'workflow_dispatch' in workflow['on']
+        assert 'workflow_run.conclusion' not in workflow['jobs']['process'].get('if', '')
+
+
+def test_deployment_does_not_transfer_schedule_notifications_to_bot():
+    production = _workflow('production.yml')
+    assert production['permissions'] == {'contents': 'read'}
+    assert 'worker_schedules' not in (ROOT / 'scripts/release.py').read_text()
+    assert not (ROOT / 'scripts/worker_schedules.py').exists()
 
 
 def test_operations_marks_auth_mail_delayed_only_after_thirty_minutes(db):

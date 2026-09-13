@@ -1,7 +1,12 @@
 name: Trackr email delivery
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    # Authentication mail still needs an independent fallback schedule.
+    - cron: "6-59/10 * * * *"
+  workflow_run:
+    workflows: ["Trackr platform jobs"]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
 concurrency:
   group: trackr-deliveries

@@ -1,4 +1,4 @@
-from .runtime import guarded
+from .runtime import WORK_BUDGET_SECONDS, guarded
 import json
 import time
 from urllib.parse import urlencode
@@ -246,7 +246,7 @@ def _process_notion_job(db, job_id, user_id, deadline):
 
 @guarded(auth=False)
 def process_notion_queue(db: Session) -> int:
-    deadline = time.monotonic() + 90
+    deadline = time.monotonic() + WORK_BUDGET_SECONDS
     jobs = db.execute(select(NotionSync.id, NotionConnection.user_id)
         .join(NotionConnection, NotionConnection.id == NotionSync.connection_id)
         .where(_notion_available()).order_by(NotionSync.id).limit(100)).all()
