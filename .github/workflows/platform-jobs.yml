@@ -54,10 +54,6 @@ jobs:
         id: notion
         continue-on-error: true
         run: timeout 180s python -m trackr_app.cli sync-notion
-      - name: Check freshness and queues
-        id: operations
-        continue-on-error: true
-        run: python -m trackr_app.cli check-operations
       - name: Report processing failure
-        if: steps.matches.outcome == 'failure' || steps.setup.outcome == 'failure' || steps.notion.outcome == 'failure' || steps.operations.outcome == 'failure'
+        if: steps.matches.outcome == 'failure' || steps.setup.outcome == 'failure' || steps.notion.outcome == 'failure'
         run: exit 1

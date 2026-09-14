@@ -53,6 +53,10 @@ jobs:
         id: digests
         continue-on-error: true
         run: timeout 150s python -m trackr_app.cli process-digests
+      - name: Check freshness and queues
+        id: operations
+        continue-on-error: true
+        run: timeout 100s python -m trackr_app.cli check-operations
       - name: Report processing failure
-        if: steps.auth.outcome == 'failure' || steps.invitations.outcome == 'failure' || steps.immediate.outcome == 'failure' || steps.digests.outcome == 'failure'
+        if: steps.auth.outcome == 'failure' || steps.invitations.outcome == 'failure' || steps.immediate.outcome == 'failure' || steps.digests.outcome == 'failure' || steps.operations.outcome == 'failure'
         run: exit 1

@@ -45,11 +45,16 @@ def test_email_delivery_workflow_is_the_single_scheduled_mail_sender():
 
     report = next(step for step in steps if step.get('run') == 'exit 1')
     assert all(f"steps.{step_id}.outcome == 'failure'" in report['if'] for step_id, _ in expected)
+    operations = next(step for step in steps if step.get('id') == 'operations')
+    assert operations['run'] == 'timeout 100s python -m trackr_app.cli check-operations'
+    assert operations['continue-on-error'] == 'true'
+    assert "steps.operations.outcome == 'failure'" in report['if']
 
     assert not (ROOT / '.github/workflows/authentication.yml').exists()
     platform = (ROOT / '.github/workflows/platform-jobs.yml').read_text()
     assert 'process-immediate-alerts' not in platform
     assert 'process-digests' not in platform
+    assert 'check-operations' not in platform
 
 
 
