@@ -70,6 +70,16 @@ def _trackr_source_url(params):
     return params.get("endpoint", TRACKR_API_URL)
 
 
+def _trackr_page_url(params):
+    if params.get("page_url"):
+        return params["page_url"]
+    region_slug = {"France": "france", "UK": "uk", "Hong Kong": "hong-kong"}.get(params.get("region"))
+    kind = params.get("type")
+    if region_slug and kind in {"summer-internships", "off-cycle-internships"} and params.get("industry", "Finance") == "Finance":
+        return f"https://app.the-trackr.com/{region_slug}-finance/{kind}"
+    return ""
+
+
 def _spring_week_is_closed(item):
     status = str(item.get("status") or item.get("applicationStatus") or "").strip().lower()
     if status in {"closed", "expired", "filled", "unavailable", "past"}:
@@ -147,6 +157,7 @@ def scrape_open_programmes(params):
         )
 
     open_offers = OfferSnapshot()
+    page_url = _trackr_page_url(params)
     for item in internships:
         if not isinstance(item, dict) or item.get("openingDate") is None:
             continue
@@ -156,7 +167,7 @@ def scrape_open_programmes(params):
         # form a stable, useful destination (as with Spring Weeks), whereas
         # rejecting the whole response would make the source permanently fail.
         offer_url = item.get("url") or (
-            f"{params['page_url']}#{item['id']}" if params.get("page_url") and item.get("id") else ""
+            f"{page_url}#{item['id']}" if page_url and item.get("id") else ""
         )
         if not canonical_offer_url(offer_url) or not (item.get("name") or '').strip() or not iso_to_date(item.get("openingDate")):
             raise RuntimeError("Trackr returned an incomplete open programme")

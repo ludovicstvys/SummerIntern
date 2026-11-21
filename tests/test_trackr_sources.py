@@ -1,5 +1,6 @@
 from unittest.mock import Mock, patch
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -71,6 +72,40 @@ def test_programme_without_external_url_uses_stable_trackr_page_anchor():
         offers = scrape_open_programmes(params)
 
     assert offers[0]["offer_url"] == "https://app.the-trackr.com/france-finance/graduate-programmes#graduate-1"
+
+
+@pytest.mark.parametrize("region,slug", [("France", "france"), ("UK", "uk"), ("Hong Kong", "hong-kong")])
+@pytest.mark.parametrize("kind", ["summer-internships", "off-cycle-internships"])
+def test_core_sources_without_external_urls_use_listing_anchors(region, slug, kind):
+    # Both platform and legacy collectors omit page_url for these six sources.
+    params = {"region": region, "industry": "Finance", "season": "2027", "type": kind}
+    response = Mock()
+    response.json.return_value = {"programmes": [{
+        "id": "programme-1", "name": "Analyst Internship", "url": None,
+        "openingDate": "2026-09-01T00:00:00.000Z", "company": {}, "categories": [],
+    }, {
+        "id": "programme-2", "name": "Another Internship", "url": "https://example.com/apply",
+        "openingDate": "2026-09-01T00:00:00.000Z", "company": {}, "categories": [],
+    }]}
+    with patch("trackr_common.requests.get", return_value=response) as request:
+        offers = scrape_open_programmes(params)
+
+    assert offers.complete
+    assert offers[0]["offer_url"] == f"https://app.the-trackr.com/{slug}-finance/{kind}#programme-1"
+    assert offers[1]["offer_url"] == "https://example.com/apply"
+    request.assert_called_once_with("https://api.the-trackr.com/programmes", params=params, timeout=30)
+
+
+@pytest.mark.parametrize("override", [{"id": None}, {"name": ""}, {"openingDate": "invalid"}, {"url": "javascript:alert(1)"}])
+def test_listing_fallback_does_not_accept_incomplete_or_unsafe_programmes(override):
+    response = Mock()
+    response.json.return_value = {"programmes": [{
+        "id": "programme-1", "name": "Analyst Internship", "url": None,
+        "openingDate": "2026-09-01T00:00:00.000Z", **override,
+    }]}
+    params = {"region": "France", "industry": "Finance", "season": "2027", "type": "summer-internships"}
+    with patch("trackr_common.requests.get", return_value=response), pytest.raises(RuntimeError, match="incomplete open programme"):
+        scrape_open_programmes(params)
 
 
 def test_requested_trackr_sources_are_registered():
